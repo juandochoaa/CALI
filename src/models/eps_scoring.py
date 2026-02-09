@@ -107,13 +107,14 @@ def build_blocks_long(
     base = long_df[[entity_col, "year"]].drop_duplicates().rename(columns={entity_col: "entity"})
 
     blocks_df = base.copy()
+    non_additive_blocks = {"REV", "NET_INCOME"}
     for block, accounts, _, abs_value in BLOCK_DEFS:
         accounts_norm = [_normalize_text(acc) for acc in accounts]
         subset = long_df[long_df["account_norm"].isin(accounts_norm)]
         if subset.empty:
             blocks_df[block] = np.nan
             continue
-        if block == "REV":
+        if block in non_additive_blocks:
             order_map = {acc: idx for idx, acc in enumerate(accounts_norm)}
             grouped_accounts = (
                 subset.groupby([entity_col, "year", "account_norm"], dropna=False)["value"]

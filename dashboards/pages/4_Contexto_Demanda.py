@@ -16,7 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps
-from dashboards.ui import apply_theme, divider, page_header, section_header
+from dashboards.ui import apply_theme, append_total_row, divider, explain_box, page_header, section_header
 
 
 st.set_page_config(page_title="Contexto y Demanda", layout="wide")
@@ -44,6 +44,13 @@ def find_col(columns: List[str], includes: List[str]) -> str | None:
 
 
 section_header("Poblacion objetivo")
+explain_box(
+    "Como se calcula",
+    [
+        "Seccion descriptiva del mercado objetivo.",
+        "Se apoya en poblacion, prevalencia y afiliacion en salud.",
+    ],
+)
 st.markdown("Objetivo: estimar el volumen potencial de pacientes.")
 st.markdown(
     """
@@ -56,6 +63,13 @@ st.markdown(
 
 divider()
 section_header("Distribucion porcentual de causas de defuncion (Colombia)")
+explain_box(
+    "Como se calcula",
+    [
+        "Se muestran imagenes oficiales de causas de defuncion.",
+        "No hay calculos en esta seccion.",
+    ],
+)
 
 raw_dir = Path(__file__).resolve().parents[2] / "data" / "raw"
 img_2024 = raw_dir / "Pastel_muertes_2024.png"
@@ -77,6 +91,13 @@ st.caption("Fuente: DANE - Estadisticas Vitales. 2025pr: cifras preliminares.")
 
 divider()
 section_header("Contexto regional (Santander)")
+explain_box(
+    "Como se calcula",
+    [
+        "Resumen de contexto regional (mortalidad cardiovascular).",
+        "No hay calculos en esta seccion.",
+    ],
+)
 st.markdown(
     "La principal causa de mortalidad en la region son las enfermedades cardiovasculares, "
     "con una tasa alarmante de 183.8 por cada 100,000 habitantes en el ano 2022. "
@@ -86,6 +107,14 @@ st.markdown(
 
 divider()
 section_header("Comparacion EPS (Santander vs Valle)")
+explain_box(
+    "Como se calcula",
+    [
+        "Cruce de afiliados y atendidos por EPS.",
+        "Atendidos = ICB atendidos + Grupo Foscal atendidos.",
+        "Se agrega fila TOTAL.",
+    ],
+)
 
 comp_df, comp_source = load_cifras_eps("Comparacion")
 if comp_df.empty:
@@ -119,6 +148,17 @@ else:
                 icb_col: "ICB atendidos",
                 foscal_col: "Grupo Foscal atendidos",
             }
+        )
+        eps_view = append_total_row(
+            eps_view,
+            "EPS",
+            [
+                "Santander afiliados",
+                "Valle afiliados",
+                "ICB atendidos",
+                "Grupo Foscal atendidos",
+                "Atendidos",
+            ],
         )
         st.dataframe(eps_view, use_container_width=True)
         st.caption("Atendidos = ICB atendidos + Grupo Foscal atendidos.")

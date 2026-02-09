@@ -22,9 +22,19 @@ from dashboards.data_loader import (
     load_capacidad_dotacion,
     load_cifras_eps,
     load_cifras_eps_raw,
+    load_eps_financials,
     load_financials,
 )
-from dashboards.ui import apply_theme, chart_container, divider, page_header, section_header, style_chart
+from dashboards.ui import (
+    apply_theme,
+    append_total_row,
+    chart_container,
+    divider,
+    explain_box,
+    page_header,
+    section_header,
+    style_chart,
+)
 
 
 st.set_page_config(page_title="Proyecciones (EEFF)", layout="wide")
@@ -408,9 +418,12 @@ tarifas_df, tarifas_source = load_cifras_eps("Tarifas")
 sant_df, sant_source = load_cifras_eps("SANTANDER")
 
 comp_metrics = compute_comparacion_metrics(comp_df)
+objetivo_valle = comp_metrics.get("posibles_valle")
+proj_totals = pd.DataFrame()
+total_year1 = np.nan
 
-tab_eeff, tab_prev, tab_comp, tab_tar, tab_sant = st.tabs(
-    ["EEFF", "Prevalencia", "Comparacion", "Tarifas", "Santander"]
+tab_eeff, tab_prev, tab_comp, tab_tar, tab_sant, tab_share = st.tabs(
+    ["EEFF", "Prevalencia", "Comparacion", "Tarifas", "Santander", "Market Share"]
 )
 
 with tab_eeff:
@@ -420,7 +433,6 @@ with tab_eeff:
         index=0,
         key="precio_scenario",
     )
-    objetivo_valle = comp_metrics.get("posibles_valle")
 
     # Santander ratios + growth (para EEFF y proyecciones)
     ratio_df = None
@@ -472,6 +484,14 @@ with tab_eeff:
         else:
             has_proj_kpi = True
             section_header("KPIs financieros")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Fuente: proyecciones.xlsx (si está disponible).",
+                    "KPIs principales: ingresos, costos, EBITDA y flujo de caja.",
+                    "Se muestran métricas del año 2030 como referencia.",
+                ],
+            )
 
             col1, col2, col3 = st.columns(3)
             col1.metric("EBITDA 2030", f"{proj.loc[proj['year'] == 2030, 'ebitda_cop_bn'].iat[0]:.1f} bn")
@@ -512,6 +532,13 @@ with tab_eeff:
                 st.caption(f"Fuente: {proj_source}")
 
             section_header("Detalle anual")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Detalle anual de ingresos, costos, EBITDA, flujo de caja y capex.",
+                    "Cifras en COP billones según el archivo de proyecciones.",
+                ],
+            )
             money_cols = [
                 "revenue_cop_bn",
                 "costs_cop_bn",
@@ -526,6 +553,14 @@ with tab_eeff:
 
     divider()
     section_header("Ventas Año 1 por capacidad", "Capacidad Cali + productividad Bogotá")
+    explain_box(
+        "Como se calcula",
+        [
+            "Capacidad base: angiografos para HEMO (2 equipos) y productividad Bogotá.",
+            "Se estima % de capacidad atendible sobre el objetivo del Valle.",
+            "Se aplican tarifas promedio por servicio y % intervenciones.",
+        ],
+    )
     cap_df = load_capacidad_dotacion()
     if cap_df.empty:
         st.warning("No hay tabla de capacidad instalada.")
@@ -684,6 +719,14 @@ with tab_eeff:
 
                 divider()
                 section_header("Proyeccion anual por servicio", "Estandarizacion de mix desde Año 2")
+                explain_box(
+                    "Como se calcula",
+                    [
+                        "Año 1 usa capacidad estimada por servicio.",
+                        "Desde Año 2 el mix se estandariza con el promedio Santander/Bogotá.",
+                        "Crecimiento anual configurable (por defecto histórico).",
+                    ],
+                )
                 total_year1 = show_df.loc[show_df["Servicio"] != "TOTAL", "Pacientes_Ano1"].sum()
 
                 growth_default = growth_avg
@@ -795,6 +838,9 @@ with tab_eeff:
                     .sum()
                     .reset_index()
                 )
+                st.session_state["proj_totals"] = proj_totals
+                st.session_state["total_year1"] = total_year1
+                st.session_state["proj_years"] = proj_years
                 st.dataframe(
                     proj_totals.style.format(
                         {
@@ -808,6 +854,13 @@ with tab_eeff:
                 if not has_proj_kpi:
                     divider()
                     section_header("KPIs financieros (proxy tarifas)")
+                    explain_box(
+                        "Como se calcula",
+                        [
+                            "Proxy construido con ventas por tarifas + ratios Santander.",
+                            "Se estima EBITDA y margen a partir de proporciones históricas.",
+                        ],
+                    )
                     revenue_by_year = proj_totals.set_index("Año")["Ventas"].sort_index()
                     rev_2030 = revenue_by_year.get(2030, np.nan)
                     ebitda_2030 = np.nan
@@ -837,6 +890,14 @@ with tab_eeff:
 
                 divider()
                 section_header("Estructura de proyeccion anual (2026-2030)")
+                explain_box(
+                    "Como se calcula",
+                    [
+                        "Ingresos proyectados por tarifas se combinan con ratios Santander.",
+                        "Cada cuenta = ratio_promedio × ingresos del año.",
+                        "Cifras en COP.",
+                    ],
+                )
                 if ratio_df is None:
                     st.warning("No hay ratios de Santander para proyectar EEFF.")
                 else:
@@ -860,6 +921,14 @@ with tab_eeff:
 
 with tab_prev:
     section_header("Prevalencia por rango de edad", "Fuente: Prevalencia")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se lee la hoja Prevalencia y se detecta la tabla GrupoEdad + Prevalencia.",
+            "Los porcentajes se convierten a proporción (0-1) si vienen en %.",
+            "Se grafica prevalencia por grupo etario.",
+        ],
+    )
     prev_df = parse_prevalencia(prev_raw)
     if prev_df.empty:
         st.warning("No se pudo leer la tabla de prevalencia.")
@@ -880,6 +949,14 @@ with tab_prev:
 
 with tab_comp:
     section_header("Comparacion Santander vs Valle", "Fuente: Comparacion")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se usa la fila TOTAL para % atendido en Santander.",
+            "Posibles atendidos Valle = % atendido Santander × Afiliados Valle.",
+            "Tabla EPS muestra afiliados y atendidos por entidad.",
+        ],
+    )
     if comp_df.empty or comp_metrics.get("error"):
         st.warning("No se pudo leer Comparacion.")
         st.caption(f"Detalle: {comp_source}")
@@ -916,11 +993,30 @@ with tab_comp:
             foscal_col: "Grupo Foscal atendidos",
         }
     )
+    eps_view = append_total_row(
+        eps_view,
+        "EPS",
+        [
+            "Santander afiliados",
+            "Valle afiliados",
+            "ICB atendidos",
+            "Grupo Foscal atendidos",
+            "Atendidos",
+        ],
+    )
     st.dataframe(eps_view, use_container_width=True)
     st.caption("Atendidos = ICB atendidos + Grupo Foscal atendidos.")
 
     divider()
     section_header("Distribucion por edad", "Calculado con EPS_Edad + Prevalencia")
+    explain_box(
+        "Como se calcula",
+        [
+            "Agrupa afiliados del Valle por quinquenio y los mapea a grupos amplios.",
+            "Aplica prevalencia por grupo para estimar pacientes.",
+            "Pondera por grupo para asignar pacientes atendidos en Valle.",
+        ],
+    )
     if edad_df.empty:
         st.warning("No se pudo leer EPS_Edad.")
         st.caption(f"Detalle: {edad_source}")
@@ -962,14 +1058,25 @@ with tab_comp:
     order = ["0-19", "20-39", "40-59", "60-79", "80+"]
     grouped["GrupoEdad"] = pd.Categorical(grouped["GrupoEdad"], categories=order, ordered=True)
     grouped = grouped.sort_values("GrupoEdad")
-
-    st.dataframe(
-        grouped.rename(columns={total_col: "Afiliados"}).reset_index(drop=True),
-        use_container_width=True,
-    )
+    view = grouped.rename(columns={total_col: "Afiliados"}).reset_index(drop=True)
+    total_row = {
+        "GrupoEdad": "TOTAL",
+        "Afiliados": view["Afiliados"].sum(skipna=True),
+        "PacientesEstimados": view["PacientesEstimados"].sum(skipna=True),
+        "PacientesPorEdad": view["PacientesPorEdad"].sum(skipna=True),
+    }
+    view = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
+    st.dataframe(view, use_container_width=True)
 
     divider()
     section_header("Formulas de calculo", "Guia de interpretacion")
+    explain_box(
+        "Como se calcula",
+        [
+            "Resumen de formulas clave usadas en Comparacion y Distribucion por edad.",
+            "Sirve como referencia para interpretar los resultados.",
+        ],
+    )
     formula_df = pd.DataFrame(
         {
             "Campo": [
@@ -1008,6 +1115,14 @@ with tab_comp:
 
 with tab_tar:
     section_header("Tarifas por sede y servicio", "Fuente: Tarifas")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se agrupan procedimientos por servicio y sede.",
+            "Tarifa promedio se pondera por pacientes.",
+            "Se calcula % pacientes, % intervenciones y ventas.",
+        ],
+    )
     if tarifas_df.empty:
         st.warning("No se pudo leer Tarifas.")
         st.caption(f"Detalle: {tarifas_source}")
@@ -1107,16 +1222,51 @@ with tab_tar:
     money_cols = ["TarifaPromedio", "Ventas"]
 
     section_header("Tabla Santander (por servicio)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Agrupa por servicio en la sede Santander.",
+            "Tarifa promedio ponderada por pacientes.",
+        ],
+    )
     st.dataframe(format_currency_df(sant_tab, money_cols), use_container_width=True)
     section_header("Tabla Bogotá (por servicio)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Agrupa por servicio en la sede Bogotá.",
+            "Tarifa promedio ponderada por pacientes.",
+        ],
+    )
     st.dataframe(format_currency_df(bog_tab, money_cols), use_container_width=True)
     section_header("Procedimientos Santander")
+    explain_box(
+        "Como se calcula",
+        [
+            "Detalle de procedimientos en Santander.",
+            "Agrupado por procedimiento (o servicio si no existe).",
+        ],
+    )
     st.dataframe(format_currency_df(proc_sant, money_cols), use_container_width=True)
     section_header("Procedimientos Bogotá")
+    explain_box(
+        "Como se calcula",
+        [
+            "Detalle de procedimientos en Bogotá.",
+            "Agrupado por procedimiento (o servicio si no existe).",
+        ],
+    )
     st.dataframe(format_currency_df(proc_bog, money_cols), use_container_width=True)
 
 with tab_sant:
     section_header("Sede Santander (Estados de resultados)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se anualizan los estados mensuales de la hoja SANTANDER.",
+            "Se filtran cuentas no contables (% y ratios).",
+        ],
+    )
     if sant_df.empty:
         st.warning("No se pudo leer la hoja SANTANDER.")
         st.caption(f"Detalle: {sant_source}")
@@ -1163,6 +1313,13 @@ with tab_sant:
     growth_avg = weighted_growth(yoy)
 
     section_header("Ingresos anuales y crecimiento YoY")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ingresos anuales a partir de suma mensual.",
+            "YoY = crecimiento anual de ingresos.",
+        ],
+    )
     ingresos_view = pd.DataFrame(
         {"Ingresos": ingresos_series, "YoY": yoy}
     ).reset_index().rename(columns={"Year": "Año"})
@@ -1173,8 +1330,194 @@ with tab_sant:
     st.caption("Cifras en millones. YoY = crecimiento anual de ingresos.")
 
     section_header("Proporciones vs ingresos (historico)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Cada cuenta dividida por ingresos del año.",
+            "Se calcula promedio histórico como referencia.",
+        ],
+    )
     ratio_df = annual_pivot.div(ingresos_series, axis=1).replace([np.inf, -np.inf], np.nan)
     ratio_df["Promedio"] = ratio_df.mean(axis=1, skipna=True)
     st.dataframe(ratio_df.reset_index(), use_container_width=True)
 
     st.caption("La estructura de proyeccion anual se muestra en el tab EEFF.")
+
+with tab_share:
+    section_header("Market share proyectado", "IPS + proyecto (2026-2030)")
+    explain_box(
+        "Como se calcula",
+        [
+            "IPS crecen con tasa de mercado; proyecto con tarifas y crecimiento.",
+            "Market share = ingresos entidad / (IPS total + proyecto).",
+        ],
+    )
+
+    proj_totals_share = st.session_state.get("proj_totals", pd.DataFrame())
+    total_year1_share = st.session_state.get("total_year1", np.nan)
+    proj_years_share = st.session_state.get("proj_years")
+
+    if proj_totals_share.empty:
+        st.warning("No hay proyecciones de ventas por tarifas disponibles.")
+        st.stop()
+
+    def pick_year_col(df: pd.DataFrame) -> str | None:
+        for col in df.columns:
+            norm = normalize_text(col)
+            if "ano" in norm or norm == "year":
+                return col
+        return None
+
+    year_col = pick_year_col(proj_totals_share)
+    if year_col is None:
+        st.warning("No se pudo detectar la columna de anio en proyecciones.")
+        st.stop()
+
+    if proj_years_share is None:
+        proj_years_share = sorted(proj_totals_share[year_col].dropna().astype(int).unique())
+
+    market_growth = st.slider(
+        "Crecimiento mercado",
+        0.02,
+        0.12,
+        0.06,
+        key="market_growth_share",
+    )
+
+    target_year = st.selectbox(
+        "Anio objetivo para llegar al potencial del Valle",
+        proj_years_share,
+        index=len(proj_years_share) - 1,
+        key="target_year_share",
+    )
+
+    growth_required = None
+    if (
+        pd.notna(objetivo_valle)
+        and pd.notna(total_year1_share)
+        and total_year1_share > 0
+        and objetivo_valle > 0
+    ):
+        steps_to_target = int(target_year) - int(proj_years_share[0])
+        if steps_to_target > 0:
+            growth_required = (objetivo_valle / total_year1_share) ** (1 / steps_to_target) - 1
+    if growth_required is not None and pd.notna(growth_required):
+        st.caption(
+            f"Tasa requerida para llegar al objetivo en {target_year}: {growth_required:.2%}."
+        )
+        if st.button(f"Ajustar crecimiento para llegar al objetivo en {target_year}"):
+            st.session_state["pending_growth_rate"] = float(growth_required)
+            st.rerun()
+    else:
+        st.caption("No se pudo calcular la tasa requerida para el objetivo.")
+
+    our_rev_mn = proj_totals_share.set_index(year_col)["Ventas"] / 1_000_000
+
+    ips_df, ips_source = load_eps_financials("IPS EEFF")
+    if ips_df.empty:
+        st.warning("No se encontro IPS EEFF.")
+        st.caption(f"Detalle: {ips_source}")
+        st.stop()
+
+    ips_year_cols = [c for c in ips_df.columns if str(c).strip().isdigit()]
+    ips_year_cols = sorted(ips_year_cols, key=lambda x: int(x))
+    base_year = 2024 if 2024 in ips_year_cols else (int(ips_year_cols[-1]) if ips_year_cols else None)
+    if base_year is None:
+        st.warning("No hay columnas de anio en IPS EEFF.")
+        st.stop()
+
+    if "IPS" in ips_df.columns and "EPS_clean" not in ips_df.columns:
+        ips_df["EPS_clean"] = ips_df["IPS"].astype(str).str.replace(".xlsx", "", regex=False).str.strip()
+
+    ips_df["CUENTA_norm"] = ips_df["CUENTA"].astype(str).map(normalize_account)
+    income_accounts = ["ingresos netos por ventas", "total ingreso operativo"]
+    work = ips_df[ips_df["CUENTA_norm"].isin(income_accounts)].copy()
+    if work.empty:
+        st.warning("No se encontraron cuentas de ingresos en IPS EEFF.")
+        st.stop()
+
+    long_df = work.melt(
+        id_vars=["EPS_clean", "CUENTA_norm"],
+        value_vars=ips_year_cols,
+        var_name="year",
+        value_name="REV",
+    )
+    long_df["REV"] = pd.to_numeric(long_df["REV"], errors="coerce")
+    long_df["year"] = long_df["year"].astype(str).str.strip().astype(int)
+
+    order_map = {acc: idx for idx, acc in enumerate(income_accounts)}
+    long_df["order"] = long_df["CUENTA_norm"].map(order_map)
+    grouped = (
+        long_df[long_df["year"] == base_year]
+        .groupby(["EPS_clean", "year", "CUENTA_norm"], dropna=False)["REV"]
+        .sum(min_count=1)
+        .reset_index()
+    )
+    grouped["order"] = grouped["CUENTA_norm"].map(order_map)
+    grouped = (
+        grouped.sort_values("order")
+        .groupby(["EPS_clean", "year"], as_index=False)
+        .first()
+    )
+    rev_base = grouped[["EPS_clean", "REV"]].rename(columns={"EPS_clean": "IPS"})
+    rev_base = rev_base.dropna(subset=["REV"])
+
+    ips_proj = rev_base.copy()
+    for year in proj_years_share:
+        ips_proj[year] = ips_proj["REV"] * (1 + market_growth) ** (year - base_year)
+    ips_proj = ips_proj.drop(columns=["REV"])
+
+    ips_total_by_year = ips_proj[proj_years_share].sum()
+    market_total = ips_total_by_year + our_rev_mn.reindex(proj_years_share).fillna(0)
+
+    share_df = ips_proj.copy()
+    for year in proj_years_share:
+        share_df[year] = share_df[year] / market_total[year]
+
+    our_row = {"IPS": "NUESTRO PROYECTO"}
+    for year in proj_years_share:
+        our_row[year] = our_rev_mn.get(year, 0.0) / market_total[year]
+    share_df = pd.concat([share_df, pd.DataFrame([our_row])], ignore_index=True)
+
+    year_view = st.selectbox(
+        "Anio para grafica de market share",
+        proj_years_share,
+        index=0,
+        key="market_share_year_view",
+    )
+
+    chart_df = share_df[["IPS", year_view]].copy()
+    chart_df["Tipo"] = np.where(
+        chart_df["IPS"] == "NUESTRO PROYECTO", "Proyecto", "IPS"
+    )
+    chart_df = chart_df.sort_values(year_view, ascending=True)
+    fig = px.bar(
+        chart_df,
+        x=year_view,
+        y="IPS",
+        color="Tipo",
+        orientation="h",
+        text=year_view,
+        title=f"Market share {year_view}",
+        color_discrete_map={"Proyecto": "#c25416", "IPS": "#0f6a62"},
+    )
+    fig.update_xaxes(tickformat=".0%")
+    fig = style_chart(fig)
+    chart_container(fig)
+
+    section_header("Tabla Market Share (IPS + proyecto)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Tabla IPS x Año con participación %.",
+            "Incluye fila TOTAL para validar ~100% por año.",
+        ],
+    )
+    total_row = {"IPS": "TOTAL"}
+    for year in proj_years_share:
+        total_row[year] = share_df[year].sum(skipna=True)
+    share_df = pd.concat([share_df, pd.DataFrame([total_row])], ignore_index=True)
+    st.dataframe(
+        share_df.style.format({year: "{:.2%}" for year in proj_years_share}),
+        use_container_width=True,
+    )

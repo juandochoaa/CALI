@@ -10,7 +10,7 @@ if str(ROOT_DIR) not in sys.path:
 import streamlit as st
 
 from dashboards.data_loader import load_capacidad_objetivo
-from dashboards.ui import apply_theme, page_header, section_header
+from dashboards.ui import apply_theme, append_total_row, explain_box, page_header, section_header
 
 
 st.set_page_config(page_title="Resumen", layout="wide")
@@ -23,6 +23,13 @@ page_header(
 )
 
 section_header("Proyecto")
+explain_box(
+    "Como se calcula",
+    [
+        "Seccion descriptiva del alcance del proyecto.",
+        "No hay calculos, solo contexto del hospital propuesto.",
+    ],
+)
 st.markdown("**Proyecto:** Hospital Cardio-Cerebro-Vascular en Cali")
 st.markdown(
     "**Descripcion:** Creacion de un hospital especializado en atencion cardiovascular y "
@@ -30,13 +37,35 @@ st.markdown(
 )
 
 section_header("Capacidad")
+explain_box(
+    "Como se calcula",
+    [
+        "Capacidad inicial instalada definida por el proyecto.",
+        "Cantidades por equipo y camas (valores absolutos).",
+    ],
+)
 cap_df = load_capacidad_objetivo()
+cap_df = append_total_row(cap_df, "Equipo", ["Cantidad"])
 st.dataframe(cap_df, use_container_width=False, hide_index=True)
 
 section_header("Alcance Geografico")
+explain_box(
+    "Como se calcula",
+    [
+        "Definicion del mercado geografico objetivo.",
+        "No hay calculos.",
+    ],
+)
 st.markdown("Valle del Cauca con enfasis en Cali.")
 
 section_header("Analisis de Demanda")
+explain_box(
+    "Como se calcula",
+    [
+        "Resumen de frentes de analisis: EPS, poblacion, prevalencia y afiliacion.",
+        "No hay calculos en esta seccion.",
+    ],
+)
 st.markdown("**EPS y Pagadores**")
 st.markdown("Objetivo: identificar viabilidad financiera del mercado.")
 st.markdown(
@@ -67,6 +96,13 @@ st.markdown(
 )
 
 section_header("Analisis de la Competencia")
+explain_box(
+    "Como se calcula",
+    [
+        "Lista de competidores y variables a revisar (dotacion y EEFF).",
+        "No hay calculos en esta seccion.",
+    ],
+)
 st.markdown("Objetivo: entender la capacidad instalada y el posicionamiento actual.")
 st.markdown(
     """
@@ -83,6 +119,13 @@ st.markdown(
 )
 
 section_header("Analisis del Talento Humano")
+explain_box(
+    "Como se calcula",
+    [
+        "Resumen de fuentes y universidades para talento especializado.",
+        "No hay calculos en esta seccion.",
+    ],
+)
 st.markdown("Objetivo: evaluar disponibilidad de personal especializado.")
 st.markdown("**Formacion Academica**")
 st.markdown(

@@ -19,7 +19,17 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps, load_eps_financials
-from dashboards.ui import apply_theme, chart_container, divider, page_header, section_header, style_chart
+from dashboards.ui import (
+    apply_theme,
+    append_avg_column,
+    append_total_row,
+    chart_container,
+    divider,
+    explain_box,
+    page_header,
+    section_header,
+    style_chart,
+)
 from src.models.eps_scoring import (
     BLOCK_DEFS,
     RATIO_SPECS,
@@ -91,6 +101,14 @@ with st.sidebar:
     )
 
 section_header("Datos fuente", "EPS")
+explain_box(
+    "Como se calcula",
+    [
+        "Fuente principal: Cali ANALISIS.xlsx (hoja EPS EEFF y EPS_Edad/EPS_Afiliados).",
+        "Se estandarizan nombres de EPS para unificar cruces entre tablas.",
+        "Las cuentas contables se agregan por año.",
+    ],
+)
 
 eps_df, eps_source = load_eps_financials("EPS EEFF")
 age_df, age_source = load_cifras_eps("EPS_Edad")
@@ -444,17 +462,20 @@ def ratio_table(
     flags_rows = []
     delta_cols: List[str] = []
     ordered_cols = ["Indicador"]
+    year_cols_str = [str(y) for y in year_cols]
     for idx, year in enumerate(year_cols):
         ordered_cols.append(str(year))
         if idx > 0:
             delta_col = f"Δ {year}"
             ordered_cols.append(delta_col)
             delta_cols.append(delta_col)
+    ordered_cols.append("Promedio")
 
     for ratio in ratio_list:
         row = {"Indicador": labels.get(ratio, ratio)}
         flags_row: Dict[str, float | None] = {}
         direction = RATIO_SPECS.get(ratio, {}).get("direction", "higher")
+        numeric_vals: List[float] = []
         for idx, year in enumerate(year_cols):
             value = subset.loc[subset["year"] == int(year), ratio]
             curr = value.iloc[0] if not value.empty else None
@@ -465,14 +486,20 @@ def ratio_table(
                 prev = prev_val.iloc[0] if not prev_val.empty else None
             base = fmt_ratio(curr, kinds.get(ratio, "ratio"))
             row[str(year)] = base
+            if curr is not None and pd.notna(curr):
+                numeric_vals.append(float(curr))
             if idx > 0:
                 delta = compute_delta(curr, prev)
                 row[f"Δ {year}"] = delta
                 flags_row[f"Δ {year}"] = improvement_flag(curr, prev, direction)
+        avg_val = np.mean(numeric_vals) if numeric_vals else np.nan
+        row["Promedio"] = fmt_ratio(avg_val, kinds.get(ratio, "ratio"))
         rows.append(row)
         flags_rows.append(flags_row)
 
     data_df = pd.DataFrame(rows).reindex(columns=ordered_cols)
+    if "Promedio" not in data_df.columns:
+        data_df["Promedio"] = None
     flags_df = pd.DataFrame(flags_rows).reindex(columns=delta_cols)
     return data_df, flags_df, delta_cols
 
@@ -535,6 +562,7 @@ def affiliates_55_table(df: pd.DataFrame) -> pd.DataFrame | None:
     )
     merged = merged[["EPS", "Femenino", "Masculino", "Total afiliados"]]
     merged = merged.sort_values("Total afiliados", ascending=False)
+    merged = append_total_row(merged, "EPS", ["Femenino", "Masculino", "Total afiliados"])
     return merged
 
 
@@ -732,7 +760,9 @@ def score_table(selected: str) -> pd.DataFrame:
             value = subset.loc[subset["year"] == int(year), col]
             row[str(year)] = round(value.iloc[0], 1) if not value.empty and pd.notna(value.iloc[0]) else None
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df = append_avg_column(df, [str(y) for y in year_cols], label="Promedio")
+    return df
 
 
 ratio_labels = {
@@ -904,6 +934,14 @@ with tab_analisis:
     last_year = max(int(y) for y in year_cols)
 
     section_header("Filtros de Análisis", "Define qué EPS comparar en las gráficas")
+    explain_box(
+        "Como se calcula",
+        [
+            "Permite seleccionar el universo de EPS para comparaciones.",
+            "Opciones: todas, intervenidas, no intervenidas, top por score.",
+            "El filtro se aplica a las gráficas y tablas agregadas.",
+        ],
+    )
     filter_options = ["Todas", "Solo intervenidas", "Solo no intervenidas"]
     if score_final_df is not None and not score_final_df.empty:
         filter_options.extend(["Top 5 (Score Final)", "Top 10 (Score Final)"])
@@ -935,6 +973,14 @@ with tab_analisis:
     divider()
 
     section_header("Evolución de Scores", "EPS según filtro seleccionado")
+    explain_box(
+        "Como se calcula",
+        [
+            "Score Financiero construido con subscores por liquidez, solvencia, rentabilidad y eficiencia.",
+            "Los subscores se obtienen de ratios winsorizados (2%-98%) y percentil por año.",
+            "El score final aplica pesos configurables en la barra lateral.",
+        ],
+    )
     st.caption(
         "Colores: tonos cálidos (rojo/naranja) = EPS intervenidas; tonos fríos (azul/verde) = demás EPS."
     )
@@ -995,6 +1041,13 @@ with tab_analisis:
     divider()
 
     section_header("Ranking por Año", "Ranking (1 = mejor)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ordena las EPS por Score Financiero dentro de cada año.",
+            "Ranking 1 corresponde a la mejor posición relativa.",
+        ],
+    )
     st.caption(
         "Colores: tonos cálidos (rojo/naranja) = EPS intervenidas; tonos fríos (azul/verde) = demás EPS."
     )
@@ -1044,6 +1097,14 @@ with tab_analisis:
 
     divider()
     section_header("Score Financiero vs. % de Mercado", "Último año disponible")
+    explain_box(
+        "Como se calcula",
+        [
+            "Cruce entre Score Financiero (último año) y % de mercado en Cali.",
+            "El tamaño del punto refleja el score.",
+            "Incluye línea de regresión para ver relación general.",
+        ],
+    )
     if score_final_df is None or score_final_df.empty:
         st.info("No hay datos de mercado para el gráfico de dispersión.")
     else:
@@ -1089,6 +1150,14 @@ with tab_analisis:
             chart_container(fig)
 
     section_header("FactorEdad y Potencial Normalizado (Cali)")
+    explain_box(
+        "Como se calcula",
+        [
+            "FactorEdad pondera afiliados de mayor edad con pesos exponenciales (k).",
+            "PotencialNormalizado es la participación de afiliados en Cali, escalada 0.5–1.5.",
+            "ScoreFinal = (ScoreFinanciero/100) × PotencialNormalizado × FactorEdad.",
+        ],
+    )
     st.caption(
         "El Score Final combina tres factores: desempeño financiero (Score Financiero), "
         "potencial de mercado en Cali (Potencial Normalizado) y perfil etario "
@@ -1128,6 +1197,16 @@ with tab_analisis:
                 ]
             ].rename(columns={"market_share": "MarketShareCali"})
 
+            avg_row = {
+                "EPS": "PROMEDIO",
+                "FactorEdad": display_df["FactorEdad"].mean(skipna=True),
+                "PotencialNormalizado": display_df["PotencialNormalizado"].mean(skipna=True),
+                "ScoreFinanciero": display_df["ScoreFinanciero"].mean(skipna=True),
+                "ScoreFinal": display_df["ScoreFinal"].mean(skipna=True),
+                "MarketShareCali": display_df["MarketShareCali"].mean(skipna=True),
+            }
+            display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
+
             styled = (
                 display_df.round(4).style
                 .background_gradient(
@@ -1145,16 +1224,34 @@ with tab_analisis:
 
             # Ranking EPS x Año usando ScoreFinal (solo EPS con Cali)
             section_header("Ranking EPS x Año (Score Final)")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Ranking anual del Score Final (incluye mercado y edad).",
+                    "Se ordena por el último año disponible.",
+                ],
+            )
             if score_final_df is None or score_final_df.empty:
                 st.info("No hay datos para el ranking de Score Final.")
             else:
                 pivot = score_final_df.pivot_table(index="EPS", columns="year", values="ScoreFinal", aggfunc="mean")
                 if last_year in pivot.columns:
                     pivot = pivot.sort_values(by=last_year, ascending=False)
+                avg_row = pivot.mean(skipna=True).to_frame().T
+                avg_row.index = ["PROMEDIO"]
+                pivot = pd.concat([pivot, avg_row])
                 st.dataframe(pivot.round(4).reset_index(), use_container_width=True)
 
 with tab_datos:
     section_header("Afiliados mayores de 55 años", "EPS_Edad (Femenino, Masculino y Total)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se filtran afiliados del Valle del Cauca en grupos de edad >= 55.",
+            "Se suman por EPS y por sexo (femenino, masculino, total).",
+            "Se agrega una fila TOTAL para el agregado del mercado.",
+        ],
+    )
     if age_df.empty:
         st.warning("No se pudo leer EPS_Edad.")
         st.caption(f"Detalle: {age_source}")
@@ -1170,6 +1267,13 @@ with tab_datos:
 
     divider()
     section_header("Composición por Régimen", "EPS por subsidiado vs contributivo (Cali)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Fuente: EPS_Afiliados en Cali (o Valle como proxy).",
+            "Se suman afiliados por régimen (subsidiado, contributivo, especiales).",
+        ],
+    )
     pivot, msg = get_regimen_pivot(mun_df, list(valle_eps_keys) if valle_eps_keys else None)
     if pivot is None:
         st.info(msg or "No hay datos de régimen para mostrar.")
@@ -1211,6 +1315,13 @@ with tab_datos:
 
     divider()
     section_header("Pirámide Poblacional", "Valle del Cauca (agregado)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Agrupa afiliados por quinquenio de edad y sexo.",
+            "Se grafican hombres (izquierda) y mujeres (derecha).",
+        ],
+    )
     if age_df.empty:
         st.warning("No se pudo leer EPS_Edad.")
         st.caption(f"Detalle: {age_source}")
@@ -1278,13 +1389,38 @@ with tab_datos:
 
 with tab_eps:
     section_header("Análisis EPS", "Indicadores y subscores de una EPS")
+    explain_box(
+        "Como se calcula",
+        [
+            "Vista detallada por una EPS seleccionada.",
+            "Se muestran subscores, ratios y estructura financiera anual.",
+        ],
+    )
     selected_eps = st.selectbox("EPS", eps_list, index=0, format_func=lambda x: str(x).upper())
 
     section_header("Subscores y Score Financiero", "EPS seleccionada")
-    st.dataframe(score_table(selected_eps), use_container_width=True)
+    explain_box(
+        "Como se calcula",
+        [
+            "Subscores por categoría = promedio de ratios disponibles.",
+            "Score Financiero = promedio ponderado de subscores.",
+            "Pesos configurables en la barra lateral.",
+        ],
+    )
+    score_df = score_table(selected_eps)
+    score_fmt = {str(year): "{:.1f}" for year in year_cols}
+    score_fmt["Promedio"] = "{:.1f}"
+    st.dataframe(score_df.style.format(score_fmt), use_container_width=True)
 
     divider()
     section_header("Piramide Poblacional", "EPS seleccionada (Valle del Cauca)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Filtra EPS_Edad por la EPS seleccionada.",
+            "Agrupa por quinquenio y sexo para la pirámide.",
+        ],
+    )
     pyramid_eps = population_pyramid_by_eps(age_df, normalize_eps_name(selected_eps))
     if pyramid_eps is None or pyramid_eps.empty:
         st.info("No hay datos para la piramide poblacional de esta EPS.")
@@ -1383,6 +1519,13 @@ with tab_eps:
 
     divider()
     section_header("Régimen EPS", "Distribución Cali")
+    explain_box(
+        "Como se calcula",
+        [
+            "Distribuye afiliados de la EPS por régimen en Cali.",
+            "Se calcula a partir de EPS_Afiliados.",
+        ],
+    )
     eps_key_selected = normalize_eps_name(selected_eps)
     pivot_eps, msg = get_regimen_pivot(mun_df, [eps_key_selected])
     if pivot_eps is None:
@@ -1428,26 +1571,65 @@ with tab_eps:
 
     divider()
     section_header("Bloques financieros", "Cuentas usadas y valores por año")
+    explain_box(
+        "Como se calcula",
+        [
+            "Cada bloque agrega cuentas contables específicas (REV, AC, PC, etc.).",
+            "Los valores son anuales y en millones de COP.",
+        ],
+    )
     st.caption("Valores en millones de COP.")
     st.caption(f"Fuente: {eps_source}")
     st.dataframe(blocks_table(selected_eps), use_container_width=True)
 
     divider()
     section_header("Indicadores de Liquidez")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios basados en activos y pasivos corrientes.",
+            "Se resaltan mejoras/deterioros respecto al año anterior.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     ratio_df, flags_df, delta_cols = ratio_table(selected_eps, liquidity_ratios, ratio_labels, ratio_kinds)
     st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
 
     divider()
     section_header("Indicadores de Endeudamiento / Solvencia")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de apalancamiento y estructura de pasivos.",
+            "Se resaltan mejoras/deterioros respecto al año anterior.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     ratio_df, flags_df, delta_cols = ratio_table(selected_eps, solvency_ratios, ratio_labels, ratio_kinds)
     st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
 
     divider()
     section_header("Indicadores de Rentabilidad")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de margen y retorno sobre activos.",
+            "Se resaltan mejoras/deterioros respecto al año anterior.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     ratio_df, flags_df, delta_cols = ratio_table(selected_eps, profitability_ratios, ratio_labels, ratio_kinds)
     st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
 
     divider()
     section_header("Indicadores de Eficiencia / Actividad")
+    explain_box(
+        "Como se calcula",
+        [
+            "Rotaciones, días de cartera/proveedores y eficiencia de costos.",
+            "Se resaltan mejoras/deterioros respecto al año anterior.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     ratio_df, flags_df, delta_cols = ratio_table(selected_eps, efficiency_ratios, ratio_labels, ratio_kinds)
     st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)

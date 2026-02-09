@@ -16,7 +16,17 @@ import plotly.express as px
 import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps, load_eps_financials
-from dashboards.ui import apply_theme, chart_container, divider, page_header, section_header, style_chart
+from dashboards.ui import (
+    apply_theme,
+    append_avg_column,
+    append_total_row,
+    chart_container,
+    divider,
+    explain_box,
+    page_header,
+    section_header,
+    style_chart,
+)
 from src.models.eps_scoring import (
     BLOCK_DEFS,
     RATIO_SPECS,
@@ -279,7 +289,9 @@ def score_table(selected: str) -> pd.DataFrame:
             value = subset.loc[subset["year"] == int(year), col]
             row[str(year)] = round(value.iloc[0], 1) if not value.empty and pd.notna(value.iloc[0]) else None
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    df = append_avg_column(df, [str(y) for y in year_cols], label="Promedio")
+    return df
 
 
 ratio_labels = {
@@ -339,12 +351,18 @@ def ratio_table(selected: str, ratio_list: List[str]) -> pd.DataFrame:
     rows = []
     for ratio in ratio_list:
         row = {"Indicador": ratio_labels.get(ratio, ratio)}
+        numeric_vals: List[float] = []
         for year in year_cols:
             value = subset.loc[subset["year"] == int(year), ratio]
             curr = value.iloc[0] if not value.empty else None
             row[str(year)] = fmt_ratio(curr, ratio_kinds.get(ratio, "ratio"))
+            if curr is not None and pd.notna(curr):
+                numeric_vals.append(float(curr))
+        avg_val = np.mean(numeric_vals) if numeric_vals else np.nan
+        row["Promedio"] = fmt_ratio(avg_val, ratio_kinds.get(ratio, "ratio"))
         rows.append(row)
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    return df
 
 tab_analisis, tab_ips, tab_cap, tab_serv = st.tabs(
     ["Analisis", "Analisis IPS", "Capacidad instalada", "Servicios"]
@@ -352,6 +370,14 @@ tab_analisis, tab_ips, tab_cap, tab_serv = st.tabs(
 
 with tab_analisis:
     section_header("Clasificación por ingresos", "IPS por ingresos totales (último año)")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se usa el ingreso operativo (REV) del último año disponible.",
+            "Se clasifican IPS en Alta/Media/Baja según terciles.",
+            "El gráfico usa ingresos totales por IPS.",
+        ],
+    )
     last_year = max(int(y) for y in year_cols)
     rev_last = ing_oper_df[ing_oper_df["year"] == last_year][["entity", "REV"]].dropna()
     if rev_last.empty:
@@ -388,6 +414,13 @@ with tab_analisis:
 
         divider()
         section_header("Evolución de ingresos", "Top 5 IPS por ingresos del último año")
+        explain_box(
+            "Como se calcula",
+            [
+                "Selecciona las 5 IPS con mayores ingresos del último año.",
+                "Se grafica la evolución anual del ingreso operativo.",
+            ],
+        )
         top_ips = rev_last.head(5)["entity"].tolist()
         rev_line = ing_oper_df[ing_oper_df["entity"].isin(top_ips)][["entity", "year", "REV"]].dropna()
         rev_line["IPS"] = rev_line["entity"].map(lambda x: str(x).upper())
@@ -406,6 +439,13 @@ with tab_analisis:
 
         divider()
         section_header("Ingresos vs Utilidad Neta", "Todas las IPS (ultimo ano)")
+        explain_box(
+            "Como se calcula",
+            [
+                "Se cruza el ingreso operativo con la utilidad neta del último año.",
+                "Permite comparar tamaño vs rentabilidad absoluta.",
+            ],
+        )
         net_last = blocks_df[blocks_df["year"] == last_year][["entity", "NET_INCOME"]]
         bar_df = rev_last[["entity", "REV"]].merge(net_last, on="entity", how="left")
         bar_df["IPS"] = bar_df["entity"].map(lambda x: str(x).upper())
@@ -433,6 +473,13 @@ with tab_analisis:
         chart_container(fig)
 
         section_header("Clasificación IPS", "Segmento por ingresos")
+        explain_box(
+            "Como se calcula",
+            [
+                "Tabla con ingresos y utilidad neta del último año.",
+                "Incluye fila TOTAL para agregar el mercado IPS.",
+            ],
+        )
         net_income_last = blocks_df[blocks_df["year"] == last_year][
             ["entity", "NET_INCOME"]
         ].rename(columns={"NET_INCOME": "Utilidad Neta"})
@@ -441,6 +488,11 @@ with tab_analisis:
         )
         class_table = class_table.drop(columns=["entity"]).rename(
             columns={"REV": f"Total Ingreso Operativo {last_year}"}
+        )
+        class_table = append_total_row(
+            class_table,
+            "IPS",
+            [f"Total Ingreso Operativo {last_year}", "Utilidad Neta"],
         )
         st.dataframe(
             class_table.style.format(
@@ -454,6 +506,14 @@ with tab_analisis:
 
         divider()
         section_header("Score Financiero IPS", "Último año")
+        explain_box(
+            "Como se calcula",
+            [
+                "Score basado en subscores de liquidez, solvencia, rentabilidad y eficiencia.",
+                "Se aplican pesos configurables en la barra lateral.",
+                "Incluye fila PROMEDIO del mercado IPS.",
+            ],
+        )
         score_last = scored_df[scored_df["year"] == last_year][
             ["entity", "score_financiero"]
         ].dropna()
@@ -466,6 +526,12 @@ with tab_analisis:
             score_last = score_last[["entity", "IPS", "score_financiero"]].rename(
                 columns={"score_financiero": "Score Financiero"}
             )
+            avg_row = {
+                "entity": "PROMEDIO",
+                "IPS": "PROMEDIO",
+                "Score Financiero": score_last["Score Financiero"].mean(skipna=True),
+            }
+            score_last = pd.concat([score_last, pd.DataFrame([avg_row])], ignore_index=True)
             st.dataframe(
                 score_last.style.format({"Score Financiero": "{:.1f}"}),
                 use_container_width=True,
@@ -473,6 +539,13 @@ with tab_analisis:
 
             divider()
             section_header("Evolución Score Financiero", "Top 5 IPS por score del último año")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Top 5 IPS por score del último año.",
+                    "Se grafica la evolución anual del Score Financiero.",
+                ],
+            )
             top_ips_score = score_last.head(5)["entity"].tolist()
             score_line = scored_df[scored_df["entity"].isin(top_ips_score)][
                 ["entity", "year", "score_financiero"]
@@ -493,6 +566,13 @@ with tab_analisis:
 
             divider()
             section_header("Score Financiero histórico", "IPS x Año")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Matriz IPS x Año con el Score Financiero.",
+                    "Incluye fila PROMEDIO por año.",
+                ],
+            )
             score_pivot = scored_df.pivot_table(
                 index="entity", columns="year", values="score_financiero", aggfunc="mean"
             )
@@ -501,6 +581,9 @@ with tab_analisis:
             score_pivot = score_pivot.set_index("IPS")
             if last_year in score_pivot.columns:
                 score_pivot = score_pivot.sort_values(last_year, ascending=False)
+            avg_row = score_pivot.mean(skipna=True).to_frame().T
+            avg_row.index = ["PROMEDIO"]
+            score_pivot = pd.concat([score_pivot, avg_row])
             st.dataframe(
                 score_pivot.style.format({year: "{:.1f}" for year in score_pivot.columns}),
                 use_container_width=True,
@@ -508,14 +591,35 @@ with tab_analisis:
 
 with tab_ips:
     section_header("Estados financieros", "IPS individual")
+    explain_box(
+        "Como se calcula",
+        [
+            "Vista detallada por IPS seleccionada.",
+            "Se separa estado de resultados y balance general según orden del Excel.",
+        ],
+    )
     selected_ips = st.selectbox("IPS", ips_list, index=0, format_func=lambda x: str(x).upper())
 
     section_header("Bloques financieros", "Cuentas usadas y valores por año")
+    explain_box(
+        "Como se calcula",
+        [
+            "Bloques construidos a partir de cuentas contables específicas.",
+            "Valores anuales en millones de COP.",
+        ],
+    )
     st.caption(f"Fuente: {ips_source}")
     st.dataframe(blocks_table(selected_ips), use_container_width=True)
 
     divider()
     section_header("Estados financieros por cuenta", "IPS seleccionada")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se respetan las cuentas y el orden del Excel.",
+            "Se muestran valores anuales con formato moneda.",
+        ],
+    )
     df_ips = ips_df[ips_df["EPS_clean"] == selected_ips]
     if df_ips.empty:
         st.info("No hay datos para la IPS seleccionada.")
@@ -543,28 +647,72 @@ with tab_ips:
 
     divider()
     section_header("Subscores y Score Financiero", "IPS seleccionada")
+    explain_box(
+        "Como se calcula",
+        [
+            "Subscores = promedio de ratios por categoría.",
+            "Score Financiero = promedio ponderado con pesos del sidebar.",
+            "Incluye columna Promedio por score.",
+        ],
+    )
     score_df = score_table(selected_ips)
     score_fmt = {str(year): "{:.1f}" for year in year_cols}
+    score_fmt["Promedio"] = "{:.1f}"
     st.dataframe(score_df.style.format(score_fmt), use_container_width=True)
 
     divider()
     section_header("Indicadores de Liquidez")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de corto plazo (liquidez).",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     st.dataframe(ratio_table(selected_ips, liquidity_ratios), use_container_width=True)
 
     divider()
     section_header("Indicadores de Endeudamiento / Solvencia")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de apalancamiento y solvencia.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     st.dataframe(ratio_table(selected_ips, solvency_ratios), use_container_width=True)
 
     divider()
     section_header("Indicadores de Rentabilidad")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de margen y retorno sobre activos.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     st.dataframe(ratio_table(selected_ips, profitability_ratios), use_container_width=True)
 
     divider()
     section_header("Indicadores de Eficiencia / Actividad")
+    explain_box(
+        "Como se calcula",
+        [
+            "Ratios de rotación y eficiencia de costos.",
+            "Se agrega columna Promedio por indicador.",
+        ],
+    )
     st.dataframe(ratio_table(selected_ips, efficiency_ratios), use_container_width=True)
 
 with tab_cap:
     section_header("Capacidad instalada", "Fuente: CI_IPS")
+    explain_box(
+        "Como se calcula",
+        [
+            "Fuente: CI_IPS (capacidad instalada por prestador).",
+            "Se agrupa y suma la cantidad por IPS.",
+        ],
+    )
     if ci_df.empty:
         st.warning("No se pudo leer CI_IPS.")
         st.caption(f"Detalle: {ci_source}")
@@ -586,6 +734,13 @@ with tab_cap:
             total_cap = total_cap.sort_values("Cantidad", ascending=False)
 
             section_header("Detalle por IPS", "Distribucion por grupo de capacidad")
+            explain_box(
+                "Como se calcula",
+                [
+                    "Distribuye la capacidad por grupos de servicio dentro de la IPS.",
+                    "Gráfico de barras horizontal por grupo.",
+                ],
+            )
             ips_list = total_cap["IPS"].tolist()
             selected_ips = st.selectbox("IPS", ips_list, index=0, key="ips_cap")
             ips_detail = work[work["IPS"] == selected_ips]
@@ -609,6 +764,13 @@ with tab_cap:
 
 with tab_serv:
     section_header("Servicios por complejidad", "Fuente: Serv_IPS")
+    explain_box(
+        "Como se calcula",
+        [
+            "Fuente: Serv_IPS (procedimientos por complejidad).",
+            "Se agrupa por IPS y grupo de servicios.",
+        ],
+    )
     if serv_df.empty:
         st.warning("No se pudo leer Serv_IPS.")
         st.caption(f"Detalle: {serv_source}")

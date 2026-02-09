@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 
@@ -193,3 +194,37 @@ def chart_container(fig, use_container_width: bool = True) -> None:
     st.markdown("<div class='plot-container'>", unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=use_container_width)
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def explain_box(title: str, bullets: list[str]) -> None:
+    if not bullets:
+        return
+    with st.expander(title):
+        st.markdown("\n".join([f"- {item}" for item in bullets]))
+
+
+def append_total_row(
+    df: pd.DataFrame,
+    label_col: str,
+    numeric_cols: list[str],
+    label: str = "TOTAL",
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+    totals = {label_col: label}
+    for col in numeric_cols:
+        if col in df.columns:
+            totals[col] = pd.to_numeric(df[col], errors="coerce").sum(min_count=1)
+    return pd.concat([df, pd.DataFrame([totals])], ignore_index=True)
+
+
+def append_avg_column(df: pd.DataFrame, year_cols: list[str], label: str = "Promedio") -> pd.DataFrame:
+    if df.empty:
+        return df
+    df = df.copy()
+    cols = [c for c in year_cols if c in df.columns]
+    if not cols:
+        return df
+    numeric = df[cols].apply(pd.to_numeric, errors="coerce")
+    df[label] = numeric.mean(axis=1, skipna=True)
+    return df
