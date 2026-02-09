@@ -25,7 +25,6 @@ from dashboards.data_loader import (
     load_financials,
 )
 from dashboards.ui import apply_theme, chart_container, divider, page_header, section_header, style_chart
-from src.models.financials import npv
 
 
 st.set_page_config(page_title="Proyecciones (EEFF)", layout="wide")
@@ -39,7 +38,6 @@ page_header(
 
 with st.sidebar:
     st.header("Parametros")
-    discount_rate = st.slider("Tasa de descuento", 0.05, 0.2, 0.12)
     st.caption("Archivo: data/raw/proyecciones.xlsx + Cali ANALISIS.xlsx")
 
 
@@ -457,6 +455,7 @@ with tab_eeff:
                 )
                 ratio_df["Promedio"] = ratio_df.mean(axis=1, skipna=True)
 
+    has_proj_kpi = False
     if proj.empty:
         pass
     else:
@@ -471,16 +470,13 @@ with tab_eeff:
         if not required_cols.issubset(set(proj.columns)):
             st.warning("La hoja de proyecciones no tiene las columnas requeridas.")
         else:
-            cashflows = proj["cashflow_cop_bn"].to_numpy()
-            npv_value = npv(cashflows, discount_rate)
-
+            has_proj_kpi = True
             section_header("KPIs financieros")
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("NPV (COP bn)", f"{npv_value:.1f}")
-            col2.metric("EBITDA 2030", f"{proj.loc[proj['year'] == 2030, 'ebitda_cop_bn'].iat[0]:.1f} bn")
-            col3.metric("Margen EBITDA", f"{proj['ebitda_cop_bn'].iloc[-1] / proj['revenue_cop_bn'].iloc[-1]:.0%}")
-            col4.metric("Capex total", f"{proj['capex_cop_bn'].sum():.1f} bn")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("EBITDA 2030", f"{proj.loc[proj['year'] == 2030, 'ebitda_cop_bn'].iat[0]:.1f} bn")
+            col2.metric("Margen EBITDA", f"{proj['ebitda_cop_bn'].iloc[-1] / proj['revenue_cop_bn'].iloc[-1]:.0%}")
+            col3.metric("Capex total", f"{proj['capex_cop_bn'].sum():.1f} bn")
 
             left, right = st.columns([1.1, 0.9])
 
@@ -809,6 +805,36 @@ with tab_eeff:
                     use_container_width=True,
                 )
 
+                if not has_proj_kpi:
+                    divider()
+                    section_header("KPIs financieros (proxy tarifas)")
+                    revenue_by_year = proj_totals.set_index("Año")["Ventas"].sort_index()
+                    rev_2030 = revenue_by_year.get(2030, np.nan)
+                    ebitda_2030 = np.nan
+                    if ratio_df is not None:
+                        ebitda_mask = ratio_df.index.map(
+                            lambda x: normalize_account(x) == "ebitda"
+                        )
+                        if ebitda_mask.any():
+                            ebitda_ratio = ratio_df.loc[ebitda_mask, "Promedio"].iloc[0]
+                            ebitda_2030 = ebitda_ratio * rev_2030 if pd.notna(rev_2030) else np.nan
+                    margen_ebitda = (
+                        ebitda_2030 / rev_2030 if pd.notna(ebitda_2030) and pd.notna(rev_2030) else np.nan
+                    )
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric(
+                        "Ingresos 2030",
+                        f"${rev_2030:,.0f}" if pd.notna(rev_2030) else "NA",
+                    )
+                    col2.metric(
+                        "EBITDA 2030",
+                        f"${ebitda_2030:,.0f}" if pd.notna(ebitda_2030) else "NA",
+                    )
+                    col3.metric(
+                        "Margen EBITDA 2030",
+                        f"{margen_ebitda:.1%}" if pd.notna(margen_ebitda) else "NA",
+                    )
+
                 divider()
                 section_header("Estructura de proyeccion anual (2026-2030)")
                 if ratio_df is None:
@@ -822,6 +848,8 @@ with tab_eeff:
                             year, np.nan
                         )
                     proj_table = proj_table.reset_index().rename(columns={"index": "Cuenta"})
+                    proj_table = proj_table[proj_table["Cuenta"].notna()]
+                    proj_table = proj_table[proj_table["Cuenta"].astype(str).str.strip() != ""]
                     year_cols = [c for c in proj_table.columns if isinstance(c, int)]
                     st.dataframe(
                         proj_table.style.format(

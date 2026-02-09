@@ -59,9 +59,6 @@ if st.session_state.get("active_page") != PAGE_ID:
 
 with st.sidebar:
     st.header("Filters")
-    st.selectbox("Escenario", ["Base", "Conservador", "Agresivo"], index=0)
-    st.slider("Horizonte (anos)", 3, 10, 5)
-    st.slider("Market share objetivo", 0.02, 0.15, 0.08)
     st.caption("Archivo EPS: Cali ANALISIS.xlsx (hoja EPS EEFF)")
     k_age = st.number_input("k (FactorEdad)", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
     st.caption(
