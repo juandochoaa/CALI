@@ -1,0 +1,16 @@
+﻿pandas
+polars
+numpy
+duckdb
+statsmodels
+scikit-learn
+numba
+joblib
+plotly
+streamlit
+dash
+great_expectations
+pydantic
+pydantic-settings
+pyyaml
+openpyxl

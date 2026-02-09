@@ -1,0 +1,6 @@
+﻿scenario:
+  name: default
+  market_share_target: 0.10
+
+monte_carlo:
+  runs: 5000

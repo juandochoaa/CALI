@@ -1,0 +1,97 @@
+from __future__ import annotations
+
+import streamlit as st
+
+from dashboards.data_loader import load_capacidad_objetivo
+from dashboards.ui import apply_theme, page_header, section_header
+
+
+st.set_page_config(page_title="Resumen", layout="wide")
+apply_theme()
+
+page_header(
+    "Estudio de Mercado",
+    "Hospital Cardio-Cerebro-Vascular en Cali",
+    "Resumen",
+)
+
+section_header("Proyecto")
+st.markdown("**Proyecto:** Hospital Cardio-Cerebro-Vascular en Cali")
+st.markdown(
+    "**Descripcion:** Creacion de un hospital especializado en atencion cardiovascular y "
+    "cerebrovascular en la ciudad de Cali, con cobertura para el Valle del Cauca."
+)
+
+section_header("Capacidad")
+cap_df = load_capacidad_objetivo()
+st.dataframe(cap_df, use_container_width=False, hide_index=True)
+
+section_header("Alcance Geografico")
+st.markdown("Valle del Cauca con enfasis en Cali.")
+
+section_header("Analisis de Demanda")
+st.markdown("**EPS y Pagadores**")
+st.markdown("Objetivo: identificar viabilidad financiera del mercado.")
+st.markdown(
+    """
+- Identificacion de EPS presentes en Cali y Valle
+- Valoracion financiera de las EPS (estados financieros, liquidez, riesgo de pago)
+- Revisar cuentas contables para el dashboard Juan David
+- Capacidad de contratacion para servicios de alta complejidad
+"""
+)
+
+st.markdown("**Poblacion Objetivo**")
+st.markdown("Objetivo: estimar el volumen potencial de pacientes.")
+st.markdown(
+    """
+- Tamano de la poblacion en Cali y Valle del Cauca
+- Prevalencia de enfermedad cardiovascular y enfermedad cerebrovascular
+- Cifras de afiliacion en Salud
+"""
+)
+
+st.markdown("**Proyeccion ventas**")
+st.markdown("Objetivo: estimar ingresos esperados.")
+st.markdown(
+    """
+- Analisis pro rata con base en poblacion Santander sabiendo que existe comuneros, HIC y FCV (Ratio)
+"""
+)
+
+section_header("Analisis de la Competencia")
+st.markdown("Objetivo: entender la capacidad instalada y el posicionamiento actual.")
+st.markdown(
+    """
+- Revisar numeros de angiografos, quirofanos, camas, estados financieros
+- Fundacion Valle de Lili
+- Clinica Imbanaco
+- Angiografia de Occidente
+- Otros
+- Dime Clinica Neurocardiovascular S.A.
+- Cardioprevent (diagnostico)
+- Corazon y aorta
+- Instituto Diagnostico (diagnostico, solo dos anos)
+"""
+)
+
+section_header("Analisis del Talento Humano")
+st.markdown("Objetivo: evaluar disponibilidad de personal especializado.")
+st.markdown("**Formacion Academica**")
+st.markdown(
+    """
+- Universidades que ofrecen Cardiologia, Cardiologia intervencionista
+  - https://salud.univalle.edu.co/la-universidad/horarios-de-atencion/28-especializaciones-clinicas/239-cirugia-vascular-periferica
+- Universidades que ofrecen programas de residencia y subespecializacion
+  - https://salud.univalle.edu.co/especializacion-en-neurocirugia
+  - https://salud.univalle.edu.co/especializacion-en-cardiologia
+"""
+)
+
+st.markdown("**Hospitales Universitarios**")
+st.markdown(
+    """
+- Hospitales formadores en la region
+- Convenios educativos - Clinica DIME
+"""
+)
