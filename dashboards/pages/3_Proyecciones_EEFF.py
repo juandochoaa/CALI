@@ -526,7 +526,11 @@ prev_raw, prev_source = load_cifras_eps_raw("Prevalencia", header=None)
 comp_df, comp_source = load_cifras_eps("Comparacion")
 edad_df, edad_source = load_cifras_eps("EPS_Edad")
 tarifas_proc_df, tarifas_proc_source = load_cifras_eps("Tarifas")
-tarifas_serv_df, tarifas_serv_source = load_cifras_eps("Tarifas Servicios")
+tarifas_serv_df, tarifas_serv_source = load_cifras_eps("TarifasServicio")
+if tarifas_serv_df.empty:
+    alt_serv_df, alt_serv_source = load_cifras_eps("Tarifas Servicios")
+    if not alt_serv_df.empty:
+        tarifas_serv_df, tarifas_serv_source = alt_serv_df, alt_serv_source
 sant_df, sant_source = load_cifras_eps("SANTANDER")
 
 comp_metrics = compute_comparacion_metrics(comp_df)
