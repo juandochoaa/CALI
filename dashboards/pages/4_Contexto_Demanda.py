@@ -136,7 +136,8 @@ else:
         comp_work[ent_col] = comp_work[ent_col].astype(str).str.strip()
         comp_work["ent_norm"] = comp_work[ent_col].map(normalize_text)
 
-        eps_table = comp_work[~comp_work["ent_norm"].isin(["otras", "total"])].copy()
+        eps_table = comp_work[~comp_work["ent_norm"].isin(["total"])].copy()
+        eps_table.loc[eps_table["ent_norm"] == "otras", ent_col] = "OTROS"
         eps_table["Atendidos"] = pd.to_numeric(eps_table[icb_col], errors="coerce") + pd.to_numeric(
             eps_table[foscal_col], errors="coerce"
         )

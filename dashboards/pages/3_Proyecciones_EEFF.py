@@ -980,7 +980,8 @@ with tab_comp:
     col3.metric("Posibles atendidos Valle", f"{posibles_valle:,.0f}" if pd.notna(posibles_valle) else "NA")
     col4.metric("Afiliados Valle del Cauca", f"{valle_total:,.0f}" if pd.notna(valle_total) else "NA")
 
-    eps_table = comp_work[~comp_work["ent_norm"].isin(["otras", "total"])].copy()
+    eps_table = comp_work[~comp_work["ent_norm"].isin(["total"])].copy()
+    eps_table.loc[eps_table["ent_norm"] == "otras", ent_col] = "OTROS"
     eps_table["Atendidos"] = pd.to_numeric(eps_table[icb_col], errors="coerce") + pd.to_numeric(
         eps_table[foscal_col], errors="coerce"
     )
