@@ -566,7 +566,7 @@ def affiliates_55_table(df: pd.DataFrame) -> pd.DataFrame | None:
     return merged
 
 
-def population_pyramid(df: pd.DataFrame) -> pd.DataFrame | None:
+def population_pyramid(df: pd.DataFrame, dept_pattern: str = "valle del cauca") -> pd.DataFrame | None:
     if df.empty:
         return None
     cols = [str(c) for c in df.columns]
@@ -579,7 +579,7 @@ def population_pyramid(df: pd.DataFrame) -> pd.DataFrame | None:
 
     work = df[[dept_col, age_col, fem_col, masc_col]].copy()
     work[dept_col] = work[dept_col].astype(str)
-    work = work[work[dept_col].str.contains("valle del cauca", case=False, na=False)]
+    work = work[work[dept_col].str.contains(dept_pattern, case=False, na=False)]
     work["age_group"] = work[age_col].map(parse_age_group)
     work = work.dropna(subset=["age_group"])
     work[fem_col] = pd.to_numeric(work[fem_col], errors="coerce")
@@ -1331,10 +1331,10 @@ with tab_datos:
         st.warning("No se pudo leer EPS_Edad.")
         st.caption(f"Detalle: {age_source}")
     else:
-        pyramid = population_pyramid(age_df)
-        if pyramid is None or pyramid.empty:
-            st.info("No hay datos para construir la pirámide poblacional.")
-        else:
+        def render_pyramid(pyramid: pd.DataFrame | None, title: str) -> None:
+            if pyramid is None or pyramid.empty:
+                st.info(f"No hay datos para {title}.")
+                return
             y_labels = pyramid["age_group"].tolist()
             male_vals = pyramid["Masculino"].tolist()
             female_vals = pyramid["Femenino"].tolist()
@@ -1371,7 +1371,7 @@ with tab_datos:
             max_val = max(max(male_vals, default=0), max(female_vals, default=0))
             fig.update_layout(
                 barmode="relative",
-                title="Pirámide Poblacional Valle del Cauca",
+                title=f"Piramide Poblacional {title}",
                 title_x=0.5,
                 title_xanchor="center",
                 xaxis=dict(
@@ -1391,6 +1391,12 @@ with tab_datos:
             )
             fig = style_chart(fig)
             chart_container(fig)
+
+        col_valle, col_sant = st.columns(2)
+        with col_valle:
+            render_pyramid(population_pyramid(age_df, "valle del cauca"), "Valle del Cauca")
+        with col_sant:
+            render_pyramid(population_pyramid(age_df, "santander"), "Santander")
 
 with tab_eps:
     section_header("Análisis EPS", "Indicadores y subscores de una EPS")
