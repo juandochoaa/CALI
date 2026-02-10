@@ -227,12 +227,15 @@ def map_cap_service_to_tariff(service: str) -> str | None:
     return None
 
 
-def tarifas_por_servicio(tarifas_df: pd.DataFrame, ciudad: str) -> pd.DataFrame:
+def parse_tarifas_servicios(
+    tarifas_df: pd.DataFrame, ciudad: str, apply_increment: bool = False
+) -> pd.DataFrame:
     cols = [str(c) for c in tarifas_df.columns]
     sede_col = find_col_any(cols, [["ciudad"], ["sede"], ["departamento"]])
     servicio_col = find_col_any(cols, [["servicio"]])
     tarifa_col = find_col_any(cols, [["tarifa"], ["precio"], ["valor"]])
     pacientes_col = find_col_any(cols, [["pacientes"], ["paciente"]])
+    incremento_col = find_col_any(cols, [["incremento"], ["aumento"]])
 
     if not all([servicio_col, tarifa_col, pacientes_col]):
         return pd.DataFrame()
@@ -246,20 +249,25 @@ def tarifas_por_servicio(tarifas_df: pd.DataFrame, ciudad: str) -> pd.DataFrame:
         ]
     work[tarifa_col] = pd.to_numeric(work[tarifa_col], errors="coerce")
     work[pacientes_col] = pd.to_numeric(work[pacientes_col], errors="coerce")
+    if incremento_col:
+        work[incremento_col] = pd.to_numeric(work[incremento_col], errors="coerce")
 
-    def weighted_tarifa(group: pd.DataFrame) -> float:
+    def weighted_avg(group: pd.DataFrame, col: str) -> float:
         pac = group[pacientes_col].sum()
         if pac and pac > 0:
-            return (group[tarifa_col] * group[pacientes_col]).sum() / pac
-        return group[tarifa_col].mean()
+            return (group[col] * group[pacientes_col]).sum() / pac
+        return group[col].mean()
 
     grouped = (
         work.groupby(servicio_col, dropna=False)
         .apply(
             lambda g: pd.Series(
                 {
-                    "TarifaPromedio": weighted_tarifa(g),
+                    "TarifaPromedio": weighted_avg(g, tarifa_col),
                     "Pacientes": g[pacientes_col].sum(),
+                    "Incremento": weighted_avg(g, incremento_col)
+                    if incremento_col
+                    else np.nan,
                 }
             )
         )
@@ -272,7 +280,110 @@ def tarifas_por_servicio(tarifas_df: pd.DataFrame, ciudad: str) -> pd.DataFrame:
     grouped["PctIntervenciones"] = grouped["ServicioTarifa"].map(
         lambda x: map_interv_pct(x, INTERV_PCT_MAP)
     )
+
+    if apply_increment:
+        inc = grouped["Incremento"].fillna(0)
+        inc = inc.apply(lambda v: v / 100 if pd.notna(v) and v > 1 else v)
+        grouped["TarifaPromedio"] = grouped["TarifaPromedio"] * (1 + inc)
     return grouped
+
+
+def parse_tarifas_procedimientos(
+    tarifas_df: pd.DataFrame, ciudad: str
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    cols = [str(c) for c in tarifas_df.columns]
+    sede_col = find_col_any(cols, [["ciudad"], ["sede"], ["departamento"]])
+    servicio_col = find_col_any(cols, [["servicio"]])
+    procedimiento_col = find_col_any(cols, [["procedimiento"]])
+    tarifa_col = find_col_any(cols, [["tarifa"], ["precio"], ["valor"]])
+    pacientes_col = find_col_any(cols, [["pacientes"], ["paciente"]])
+
+    if not all([servicio_col, procedimiento_col, tarifa_col, pacientes_col]):
+        return pd.DataFrame(), pd.DataFrame()
+
+    work = tarifas_df.copy()
+    work[servicio_col] = work[servicio_col].astype(str)
+    work[procedimiento_col] = work[procedimiento_col].astype(str)
+    if sede_col:
+        work[sede_col] = work[sede_col].astype(str)
+        work = work[
+            work[sede_col].map(normalize_text).str.contains(normalize_text(ciudad), na=False)
+        ]
+    work[tarifa_col] = pd.to_numeric(work[tarifa_col], errors="coerce")
+    work[pacientes_col] = pd.to_numeric(work[pacientes_col], errors="coerce")
+
+    def weighted_avg(group: pd.DataFrame, col: str) -> float:
+        pac = group[pacientes_col].sum()
+        if pac and pac > 0:
+            return (group[col] * group[pacientes_col]).sum() / pac
+        return group[col].mean()
+
+    proc = (
+        work.groupby([servicio_col, procedimiento_col], dropna=False)
+        .apply(
+            lambda g: pd.Series(
+                {
+                    "TarifaPromedio": weighted_avg(g, tarifa_col),
+                    "Pacientes": g[pacientes_col].sum(),
+                }
+            )
+        )
+        .reset_index()
+        .rename(columns={servicio_col: "ServicioTarifa", procedimiento_col: "Procedimiento"})
+    )
+    proc["ServicioTarifa"] = proc["ServicioTarifa"].astype(str).str.upper().str.strip()
+    proc["Procedimiento"] = proc["Procedimiento"].astype(str).str.upper().str.strip()
+    total_pac = proc["Pacientes"].sum()
+    proc["PctPacientes"] = proc["Pacientes"] / total_pac if total_pac else np.nan
+
+    service_totals = proc.groupby("ServicioTarifa")["Pacientes"].sum()
+    proc["PctIntervenciones"] = proc.apply(
+        lambda row: map_interv_pct(row["ServicioTarifa"], INTERV_PCT_MAP)
+        * (row["Pacientes"] / service_totals.get(row["ServicioTarifa"], np.nan))
+        if service_totals.get(row["ServicioTarifa"], 0) > 0
+        else np.nan,
+        axis=1,
+    )
+
+    serv = (
+        proc.groupby("ServicioTarifa", dropna=False)
+        .apply(
+            lambda g: pd.Series(
+                {
+                    "TarifaPromedio": (
+                        (g["TarifaPromedio"] * g["Pacientes"]).sum() / g["Pacientes"].sum()
+                        if g["Pacientes"].sum() > 0
+                        else g["TarifaPromedio"].mean()
+                    ),
+                    "Pacientes": g["Pacientes"].sum(),
+                }
+            )
+        )
+        .reset_index()
+    )
+    serv["ServicioTarifa"] = serv["ServicioTarifa"].astype(str).str.upper().str.strip()
+    total_pac_serv = serv["Pacientes"].sum()
+    serv["PctPacientes"] = serv["Pacientes"] / total_pac_serv if total_pac_serv else np.nan
+    serv["PctIntervenciones"] = serv["ServicioTarifa"].map(
+        lambda x: map_interv_pct(x, INTERV_PCT_MAP)
+    )
+    return proc, serv
+
+
+def selector_escenario_tarifas(
+    scenario: str,
+    tarifas_serv_df: pd.DataFrame,
+    tarifas_proc_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    scenario_norm = normalize_text(scenario)
+    if "procedimiento" in scenario_norm:
+        city = "Bogota" if "bogota" in scenario_norm else "Santander"
+        proc_table, serv_table = parse_tarifas_procedimientos(tarifas_proc_df, city)
+        return serv_table, proc_table
+    if "aumento" in scenario_norm:
+        return parse_tarifas_servicios(tarifas_serv_df, "Bogota", apply_increment=True), None
+    city = "Bogota" if "bogota" in scenario_norm else "Santander"
+    return parse_tarifas_servicios(tarifas_serv_df, city), None
 
 
 def build_tarifa_table(
@@ -414,7 +525,8 @@ proj, proj_source = load_financials()
 prev_raw, prev_source = load_cifras_eps_raw("Prevalencia", header=None)
 comp_df, comp_source = load_cifras_eps("Comparacion")
 edad_df, edad_source = load_cifras_eps("EPS_Edad")
-tarifas_df, tarifas_source = load_cifras_eps("Tarifas")
+tarifas_proc_df, tarifas_proc_source = load_cifras_eps("Tarifas")
+tarifas_serv_df, tarifas_serv_source = load_cifras_eps("Tarifas Servicios")
 sant_df, sant_source = load_cifras_eps("SANTANDER")
 
 comp_metrics = compute_comparacion_metrics(comp_df)
@@ -429,7 +541,13 @@ tab_eeff, tab_prev, tab_comp, tab_tar, tab_sant, tab_share = st.tabs(
 with tab_eeff:
     st.selectbox(
         "Escenario de precios",
-        ["Santander", "Bogota", "Competencia Cali (pendiente)"],
+        [
+            "Tarifas por servicio - Santander",
+            "Tarifas por procedimiento - Santander",
+            "Tarifas por servicio - Bogota",
+            "Tarifas por procedimiento - Bogota",
+            "Bogota por servicio + aumento Cali",
+        ],
         index=0,
         key="precio_scenario",
     )
@@ -569,15 +687,24 @@ with tab_eeff:
         if pd.isna(objetivo_valle):
             st.warning("No se pudo calcular el objetivo Valle (posibles atendidos).")
         else:
-            scenario = st.session_state.get("precio_scenario", "Santander")
+            scenario = st.session_state.get("precio_scenario", "Tarifas por servicio - Santander")
             scenario_norm = normalize_text(scenario)
-            ciudad = "Bogota" if "bogota" in scenario_norm else "Santander"
-            tarifas_serv = tarifas_por_servicio(tarifas_df, ciudad)
-            tarifas_sant = tarifas_por_servicio(tarifas_df, "Santander")
-            tarifas_bog = tarifas_por_servicio(tarifas_df, "Bogota")
-            if tarifas_serv.empty:
-                tarifas_serv = tarifas_sant if not tarifas_sant.empty else tarifas_bog
-            st.caption(f"Tarifas usadas: {ciudad}.")
+
+            tariffs_serv, _ = selector_escenario_tarifas(
+                scenario, tarifas_serv_df, tarifas_proc_df
+            )
+
+            if "procedimiento" in scenario_norm:
+                _, tarifas_sant = parse_tarifas_procedimientos(tarifas_proc_df, "Santander")
+                _, tarifas_bog = parse_tarifas_procedimientos(tarifas_proc_df, "Bogota")
+            else:
+                tarifas_sant = parse_tarifas_servicios(tarifas_serv_df, "Santander")
+                tarifas_bog = parse_tarifas_servicios(tarifas_serv_df, "Bogota")
+
+            if tariffs_serv.empty:
+                tariffs_serv = tarifas_sant if not tarifas_sant.empty else tarifas_bog
+
+            st.caption(f"Escenario activo: {scenario}.")
 
             cap_work = cap_df.copy()
             cap_work["ServicioTarifa"] = cap_work["Servicio"].map(map_cap_service_to_tariff)
@@ -638,10 +765,10 @@ with tab_eeff:
                 "Los demas servicios se escalan con el mix promedio Santander/Bogota."
             )
 
-            if tarifas_serv.empty:
+            if tariffs_serv.empty:
                 st.warning("No se encontraron tarifas para el escenario seleccionado.")
             else:
-                tariffs = tarifas_serv.copy()
+                tariffs = tariffs_serv.copy()
                 if pct_prom is not None:
                     tariffs = tariffs.merge(
                         pct_prom[["ServicioTarifa", "PctPacProm"]], on="ServicioTarifa", how="left"
@@ -981,7 +1108,7 @@ with tab_comp:
     col4.metric("Afiliados Valle del Cauca", f"{valle_total:,.0f}" if pd.notna(valle_total) else "NA")
 
     eps_table = comp_work[~comp_work["ent_norm"].isin(["total"])].copy()
-    eps_table.loc[eps_table["ent_norm"] == "otras", ent_col] = "OTROS"
+    eps_table.loc[eps_table["ent_norm"].isin(["otras", "otros"]), ent_col] = "OTROS"
     eps_table["Atendidos"] = pd.to_numeric(eps_table[icb_col], errors="coerce") + pd.to_numeric(
         eps_table[foscal_col], errors="coerce"
     )
@@ -1115,150 +1242,127 @@ with tab_comp:
         chart_container(fig)
 
 with tab_tar:
-    section_header("Tarifas por sede y servicio", "Fuente: Tarifas")
+    section_header("Tarifas por sede y servicio", "Fuente: Tarifas Servicios / Tarifas")
     explain_box(
         "Como se calcula",
         [
-            "Se agrupan procedimientos por servicio y sede.",
+            "Se usan dos hojas: Tarifas (procedimientos) y Tarifas Servicios (servicio).",
             "Tarifa promedio se pondera por pacientes.",
-            "Se calcula % pacientes, % intervenciones y ventas.",
+            "Se calcula % pacientes, % intervenciones y ventas estimadas.",
         ],
     )
-    if tarifas_df.empty:
-        st.warning("No se pudo leer Tarifas.")
-        st.caption(f"Detalle: {tarifas_source}")
+
+    if tarifas_serv_df.empty and tarifas_proc_df.empty:
+        st.warning("No se pudieron leer las hojas de tarifas.")
+        st.caption(f"Detalle servicios: {tarifas_serv_source} | procedimientos: {tarifas_proc_source}")
         st.stop()
 
-    tarifa_cols = [str(c) for c in tarifas_df.columns]
-    sede_col = find_col_any(tarifa_cols, [["sede"], ["ciudad"], ["departamento"]])
-    servicio_col = find_col_any(tarifa_cols, [["servicio"]])
-    procedimiento_col = find_col_any(tarifa_cols, [["procedimiento"]])
-    tarifa_col = find_col_any(tarifa_cols, [["tarifa"], ["precio"], ["valor"]])
-    pacientes_col = find_col_any(tarifa_cols, [["pacientes"], ["paciente"]])
-    inter_col = find_col_any(tarifa_cols, [["intervencion"], ["intervenciones"]])
-
-    missing = [name for name, col in [("Sede", sede_col), ("Servicio", servicio_col), ("Tarifa", tarifa_col), ("Pacientes", pacientes_col)] if col is None]
-    if missing:
-        st.warning("Faltan columnas requeridas en Tarifas.")
-        st.caption(f"Columnas encontradas: {tarifa_cols}")
-        st.stop()
+    if tarifas_serv_df.empty:
+        st.warning("No se pudo leer la hoja Tarifas Servicios.")
+        st.caption(f"Detalle: {tarifas_serv_source}")
+    if tarifas_proc_df.empty:
+        st.warning("No se pudo leer la hoja Tarifas (procedimientos).")
+        st.caption(f"Detalle: {tarifas_proc_source}")
 
     posibles_valle = comp_metrics.get("posibles_valle")
     if posibles_valle is None or pd.isna(posibles_valle):
         st.warning("No se pudo calcular posibles pacientes Valle. Revisa Comparacion.")
 
-    scenario = st.session_state.get("precio_scenario", "Santander")
+    scenario = st.session_state.get("precio_scenario", "Tarifas por servicio - Santander")
     st.caption(f"Escenario de precios activo: {scenario}.")
-    if "Competencia Cali" in scenario:
-        st.warning("Escenario Competencia Cali pendiente: no hay tarifas Cali en el Excel.")
     st.caption(
         "%% Intervenciones usados: MDNI 46.02%, CONSULTA 135.99%, REPRO 46.07%, HEMO 8.99%, "
         "ELECTRO 8.72%, CIRUGIA 9.15%."
     )
 
-    missing_services = []
-    for srv in tarifas_df[servicio_col].dropna().astype(str).unique():
-        if pd.isna(map_interv_pct(srv, INTERV_PCT_MAP)):
-            missing_services.append(srv)
-    if missing_services:
-        st.warning(
-            "Servicios sin % de intervenciones mapeado: "
-            + ", ".join(sorted(missing_services)[:10])
-            + ("..." if len(missing_services) > 10 else "")
-        )
-
-    sant_tab = build_tarifa_table(
-        tarifas_df,
-        sede_col=sede_col,
-        target_sede="Santander",
-        servicio_col=servicio_col,
-        procedimiento_col=None,
-        tarifa_col=tarifa_col,
-        pacientes_col=pacientes_col,
-        posibles_valle=posibles_valle,
-        inter_col=inter_col,
-        interv_map=INTERV_PCT_MAP,
-    )
-    bog_tab = build_tarifa_table(
-        tarifas_df,
-        sede_col=sede_col,
-        target_sede="Bogota",
-        servicio_col=servicio_col,
-        procedimiento_col=None,
-        tarifa_col=tarifa_col,
-        pacientes_col=pacientes_col,
-        posibles_valle=posibles_valle,
-        inter_col=inter_col,
-        interv_map=INTERV_PCT_MAP,
+    # Construccion de tablas
+    sant_serv = parse_tarifas_servicios(tarifas_serv_df, "Santander") if not tarifas_serv_df.empty else pd.DataFrame()
+    bog_serv = parse_tarifas_servicios(tarifas_serv_df, "Bogota") if not tarifas_serv_df.empty else pd.DataFrame()
+    bog_serv_cali = (
+        parse_tarifas_servicios(tarifas_serv_df, "Bogota", apply_increment=True)
+        if not tarifas_serv_df.empty
+        else pd.DataFrame()
     )
 
-    proc_sant = build_tarifa_table(
-        tarifas_df,
-        sede_col=sede_col,
-        target_sede="Santander",
-        servicio_col=servicio_col,
-        procedimiento_col=procedimiento_col,
-        tarifa_col=tarifa_col,
-        pacientes_col=pacientes_col,
-        posibles_valle=posibles_valle,
-        inter_col=inter_col,
-        interv_map=INTERV_PCT_MAP,
+    proc_sant, _ = (
+        parse_tarifas_procedimientos(tarifas_proc_df, "Santander")
+        if not tarifas_proc_df.empty
+        else (pd.DataFrame(), pd.DataFrame())
     )
-    proc_bog = build_tarifa_table(
-        tarifas_df,
-        sede_col=sede_col,
-        target_sede="Bogota",
-        servicio_col=servicio_col,
-        procedimiento_col=procedimiento_col,
-        tarifa_col=tarifa_col,
-        pacientes_col=pacientes_col,
-        posibles_valle=posibles_valle,
-        inter_col=inter_col,
-        interv_map=INTERV_PCT_MAP,
+    proc_bog, _ = (
+        parse_tarifas_procedimientos(tarifas_proc_df, "Bogota")
+        if not tarifas_proc_df.empty
+        else (pd.DataFrame(), pd.DataFrame())
     )
 
-    if procedimiento_col is None:
-        st.caption("No se encontro columna de Procedimiento; se usa Servicio como proxy.")
+    def enrich_tarifa_table(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        out = df.copy()
+        if posibles_valle is not None and pd.notna(posibles_valle):
+            out["PacientesValle"] = out["PctPacientes"] * posibles_valle
+            out["Intervenciones"] = out["PacientesValle"] * (1 + out["PctIntervenciones"].fillna(0))
+            out["Ventas"] = out["Intervenciones"] * out["TarifaPromedio"]
+        else:
+            out["PacientesValle"] = np.nan
+            out["Intervenciones"] = np.nan
+            out["Ventas"] = np.nan
+        return out
 
-    money_cols = ["TarifaPromedio", "Ventas"]
+    def add_tarifa_total(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
+        if df.empty:
+            return df
+        total = {label_col: "TOTAL"}
+        pac = pd.to_numeric(df.get("Pacientes"), errors="coerce").sum(min_count=1)
+        if "TarifaPromedio" in df.columns:
+            if pac and pac > 0:
+                total["TarifaPromedio"] = (
+                    pd.to_numeric(df["TarifaPromedio"], errors="coerce") * pd.to_numeric(df["Pacientes"], errors="coerce")
+                ).sum(min_count=1) / pac
+            else:
+                total["TarifaPromedio"] = pd.to_numeric(df["TarifaPromedio"], errors="coerce").mean()
+        for col in ["Pacientes", "PctPacientes", "PctIntervenciones", "PacientesValle", "Intervenciones", "Ventas"]:
+            if col in df.columns:
+                total[col] = pd.to_numeric(df[col], errors="coerce").sum(min_count=1)
+        return pd.concat([df, pd.DataFrame([total])], ignore_index=True)
 
-    section_header("Tabla Santander (por servicio)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Agrupa por servicio en la sede Santander.",
-            "Tarifa promedio ponderada por pacientes.",
-        ],
-    )
-    st.dataframe(format_currency_df(sant_tab, money_cols), use_container_width=True)
-    section_header("Tabla Bogotá (por servicio)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Agrupa por servicio en la sede Bogotá.",
-            "Tarifa promedio ponderada por pacientes.",
-        ],
-    )
-    st.dataframe(format_currency_df(bog_tab, money_cols), use_container_width=True)
-    section_header("Procedimientos Santander")
-    explain_box(
-        "Como se calcula",
-        [
-            "Detalle de procedimientos en Santander.",
-            "Agrupado por procedimiento (o servicio si no existe).",
-        ],
-    )
-    st.dataframe(format_currency_df(proc_sant, money_cols), use_container_width=True)
-    section_header("Procedimientos Bogotá")
-    explain_box(
-        "Como se calcula",
-        [
-            "Detalle de procedimientos en Bogotá.",
-            "Agrupado por procedimiento (o servicio si no existe).",
-        ],
-    )
-    st.dataframe(format_currency_df(proc_bog, money_cols), use_container_width=True)
+    def render_tarifa_table(title: str, df: pd.DataFrame, label_col: str) -> None:
+        section_header(title)
+        if df.empty:
+            st.warning("No hay datos para esta tabla.")
+            return
+        view = enrich_tarifa_table(df)
+        view = add_tarifa_total(view, label_col)
+        fmt = {
+            "TarifaPromedio": fmt_currency,
+            "Ventas": fmt_currency,
+            "Pacientes": "{:,.0f}",
+            "PacientesValle": "{:,.0f}",
+            "Intervenciones": "{:,.0f}",
+            "PctPacientes": fmt_percent,
+            "PctIntervenciones": fmt_percent,
+        }
+        st.dataframe(view.style.format(fmt), use_container_width=True)
 
+    # Tablas por servicio
+    if not sant_serv.empty:
+        sant_serv = sant_serv.rename(columns={"ServicioTarifa": "Servicio"})
+    if not bog_serv.empty:
+        bog_serv = bog_serv.rename(columns={"ServicioTarifa": "Servicio"})
+    if not bog_serv_cali.empty:
+        bog_serv_cali = bog_serv_cali.rename(columns={"ServicioTarifa": "Servicio"})
+
+    # Tablas por procedimiento
+    if not proc_sant.empty:
+        proc_sant = proc_sant.rename(columns={"ServicioTarifa": "Servicio"})
+    if not proc_bog.empty:
+        proc_bog = proc_bog.rename(columns={"ServicioTarifa": "Servicio"})
+
+    render_tarifa_table("Servicio Santander", sant_serv, "Servicio")
+    render_tarifa_table("Procedimientos Santander", proc_sant, "Procedimiento")
+    render_tarifa_table("Servicio Bogota", bog_serv, "Servicio")
+    render_tarifa_table("Procedimientos Bogota", proc_bog, "Procedimiento")
+    render_tarifa_table("Bogota por servicio + aumento Cali", bog_serv_cali, "Servicio")
 with tab_sant:
     section_header("Sede Santander (Estados de resultados)")
     explain_box(

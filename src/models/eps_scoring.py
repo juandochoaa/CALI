@@ -54,7 +54,16 @@ BLOCK_DEFS: List[Tuple[str, List[str], bool, bool]] = [
     ("DEPR_AMORT", ["Gastos de depreciacion, amortizacion y deterioro"], False, True),
     (
         "NET_INCOME",
-        ["Ganancia (Perdida) Neta", "Ganancias despues de impuestos", "Ganancia o Perdida del Periodo"],
+        [
+            "Ganancia (Perdida) Neta",
+            "Ganancias despues de impuestos",
+            "Ganancia o Perdida del Periodo",
+            "Utilidad neta",
+            "Utilidad (perdida) neta",
+            "Resultado del ejercicio",
+            "Resultado neto",
+            "Resultado del periodo",
+        ],
         False,
         False,
     ),

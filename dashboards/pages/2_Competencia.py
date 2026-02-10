@@ -11,6 +11,7 @@ if str(ROOT_DIR) not in sys.path:
 import unicodedata
 from typing import List
 
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -222,6 +223,7 @@ def blocks_table(selected: str) -> pd.DataFrame:
 ips_df, ips_source = load_eps_financials("IPS EEFF")
 serv_df, serv_source = load_cifras_eps("Serv_IPS")
 ci_df, ci_source = load_cifras_eps("CI_IPS")
+tarifas_comp_df, tarifas_comp_source = load_cifras_eps("TarifasCompetencia")
 
 if ips_df.empty:
     st.warning("No se encontro el archivo de estados financieros IPS o no se pudo leer.")
@@ -347,6 +349,8 @@ efficiency_ratios = ["asset_turnover", "dso", "dpo", "opex_cash_ratio", "da_inte
 
 
 def ratio_table(selected: str, ratio_list: List[str]) -> pd.DataFrame:
+    import numpy as np
+
     subset = ratios_df[ratios_df["entity"] == selected]
     rows = []
     for ratio in ratio_list:
@@ -364,8 +368,8 @@ def ratio_table(selected: str, ratio_list: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     return df
 
-tab_analisis, tab_ips, tab_cap, tab_serv = st.tabs(
-    ["Analisis", "Analisis IPS", "Capacidad instalada", "Servicios"]
+tab_analisis, tab_ips, tab_cap, tab_serv, tab_tarifas = st.tabs(
+    ["Analisis", "Analisis IPS", "Capacidad instalada", "Servicios", "Tarifas IPS"]
 )
 
 with tab_analisis:
@@ -589,6 +593,95 @@ with tab_analisis:
                 use_container_width=True,
             )
 
+    divider()
+    section_header("Ubicacion estrategica", "Sector Melendez y Comuna 18")
+    explain_box(
+        "Como se calcula",
+        [
+            "Seccion descriptiva con datos demograficos y urbanisticos.",
+            "No hay calculos financieros, solo contexto territorial.",
+        ],
+    )
+    st.markdown("""
+**4. Ubicacion estrategica: Sector Melendez y Comuna 18**
+
+**4.1 Caracterizacion del Sector Melendez**
+- Ubicacion propuesta: Calle 5 con Carrera 95
+- Barrio/Sector: Melendez
+- Comuna: 18 (sur-occidente de Cali)
+""")
+
+    demo_df = pd.DataFrame(
+        {
+            "Indicador": [
+                "Poblacion total",
+                "% poblacion Cali",
+                "Distribucion sexo",
+                "Area",
+                "Densidad poblacional",
+                "Viviendas",
+                "Predios construidos",
+            ],
+            "Valor": [
+                "100,276 habitantes",
+                "4.9%",
+                "Hombres: 49.2% / Mujeres: 50.8%",
+                "542.9 hectareas (4.5% de Cali)",
+                "184.7 hab/ha (promedio Cali: 168.7)",
+                "24,705 (4.9% del total de Cali)",
+                "16,782",
+            ],
+        }
+    )
+    st.dataframe(demo_df, use_container_width=True, hide_index=True)
+
+    st.markdown("**Estratificacion Comuna 18**")
+    strat_df = pd.DataFrame(
+        {
+            "Estrato": ["1", "2", "3 (Moda)", "4", "5 y 6", "TOTAL E2+E3"],
+            "% Lados de Manzana": ["Minoritario", "~30%", "~43%", "1.2%", "0%", "72.9%"],
+            "Observacion": ["Presente", "Significativo", "Predominante", "Marginal", "Ausentes", "Poblacion objetivo"],
+        }
+    )
+    st.dataframe(strat_df, use_container_width=True, hide_index=True)
+    st.caption("Hallazgo: 72.9% de viviendas en estratos 2 y 3, alineado con el segmento objetivo.")
+
+    st.markdown("""
+**4.2 Proyecto urbanistico Ciudad Melendez**
+- Plan parcial aprobado en 2010.
+- Area total de planificacion: 152 ha
+- Area de desarrollo: 75 ha
+- Area de reserva: 54 ha
+- Cinturon ecologico: 23 ha
+- Ubicacion: entre calles 59 y 61, carreras 93 y 95.
+
+**Ventajas de la ubicacion**
+- Desarrollo moderno con infraestructura planificada
+- Conexion al transporte publico masivo (MIO)
+- Cercania a centros comerciales e instituciones educativas
+- Acceso vial directo a Calle 5 (eje principal este-oeste)
+""")
+
+    st.markdown("**4.3 Ventaja geografica y estrategica**")
+    st.markdown("""
+- Acceso zona oriente (comunas 13, 14, 15, 16, 21): 8-10 km, 15-25 min, poblacion potencial 620,000.
+- Cobertura zona ladera (comunas 1, 18, 20): 340,000 habitantes.
+- Conexion sur y centro-sur (comunas 17, 22, 11, 12): ~200,000 habitantes.
+- Mercado total accesible: >1,160,000 habitantes estratos 1-2-3 en 10-15 km.
+""")
+
+    comp_df = pd.DataFrame(
+        {
+            "Institucion": ["ICB Melendez", "Valle del Lili", "Imbanaco", "DIME", "HUV"],
+            "Distancia a Oriente": ["8-10 km", "15-18 km", "12-15 km", "12-16 km", "10-12 km"],
+            "Tiempo estimado": ["15-25 min", "30-45 min", "25-40 min", "25-40 min", "20-35 min"],
+        }
+    )
+    st.dataframe(comp_df, use_container_width=True, hide_index=True)
+    st.caption(
+        "Ventaja competitiva: el ICB seria el centro especializado mas cercano "
+        "a la zona con mayor concentracion de poblacion vulnerable."
+    )
 with tab_ips:
     section_header("Estados financieros", "IPS individual")
     explain_box(
@@ -599,6 +692,131 @@ with tab_ips:
         ],
     )
     selected_ips = st.selectbox("IPS", ips_list, index=0, format_func=lambda x: str(x).upper())
+
+    divider()
+    section_header("Analisis cualitativo", "Resumen ejecutivo por IPS")
+    explain_box(
+        "Como se calcula",
+        [
+            "Texto cualitativo preparado por el equipo.",
+            "Se enfoca en factores financieros, riesgos y contexto operativo.",
+        ],
+    )
+
+    def norm_key(text: str) -> str:
+        return normalize_text(text).lower().strip()
+
+    QUALITATIVE_NOTES = {
+        "fundacion valle del lili": """
+**1. Situacion financiera general (2024 vs 2023)**
+- 2024: **Utilidad** de **$1.056 millones**
+- 2023: **Perdida** de **$10.467 millones**
+- Cambio: **recuperacion de $11.523 millones (+110%)**
+
+**Hallazgo clave:** la utilidad es **minima** (0,07% sobre ingresos de $1,6 billones). Aunque se salio de perdidas, las utilidades siguen muy bajas.
+
+**2. Principales factores que afectaron utilidades**
+
+**A. Explosion del deterioro de cartera (Factor #1)**
+- Deterioro de cartera 2024: **$122.388 millones** (vs $47.857M en 2023) **+156%**
+- Provision de glosas 2024: **$1.802 millones** (vs $52M en 2023) **+3.365%**
+- Total provisiones 2024: **$124.190 millones** (vs $47.909M) **+159%**
+
+**Por que:** crisis del sector salud; EPS intervenidas con bajo pago (Nueva EPS, SOS, Sanitas, Coosalud, Asmet Salud, Emssanar).
+- Cartera vencida: **$622.972M -> $866.550M (+39%)**
+- Cartera >360 dias: **$173.058M (20% del total)**
+- Texto del documento: incremento en provisiones por deudores debido a disminucion de pagos y aumento de cuentas por cobrar.
+
+**B. Aumento de gastos financieros (Factor #2)**
+- Intereses prestamos: **$64.460M** (vs $37.652M) **+71%**
+- Gasto financiero neto: **$33.138M** (vs $68.170M) **-51%**
+- Deuda total: **$495.206M** (vs $310.794M) **+59%**
+
+**Drivers:** expansion, capital de trabajo por cartera y tasas de interes mas altas.
+Nota positiva: menor capitalizacion de intereses en 2024 ($2.244M vs $6.487M en 2023).
+
+**C. Aumento de costos operacionales**
+- Costo de ventas: **$1.330.592M** (vs $1.213.666M) **+9,6%**
+- Gastos de administracion: **$236.589M** (vs $156.643M) **+51%**
+- Drivers: materiales (+12,3%), honorarios medicos (+11,6%), depreciacion (+9,9%), personal (+7,7%).
+
+**3. Expansiones e inversiones (explican caida de utilidades)**
+- Inversion en activos fijos 2024: **$90.990M**
+- Torre 2 en construccion: **$63.732M** (vs $43.561M)
+- Adquisicion nuda propiedad: **$28.507M**
+- Usufructo -> propiedad plena: terrenos **+ $61.627M**, edificios **+ $128.944M**
+- Torre 8 (anteproyecto): inversion proyectada **$150.000M**
+- Expansion Sede Limonar: crecimiento de consultorios y camas
+- Equipamiento medico y tecnologico: **$20.068M** aprox.
+
+**4. Red de sedes (6)**
+- Sede Principal (Carrera 98 # 18-49)
+- Sede Limonar
+- Sede Centenario
+- Sede Av. Estacion
+- Sede Betania
+- Sede Alfaguara (Jamundi)
+
+**5. Multas y sanciones**
+- No se evidencian multas materiales Supersalud 2023-2024.
+- Certificaciones: ICONTEC 2024, Hospital Universitario, JCI (dic 2024).
+
+**6. Politicas contables / cambios**
+- Deterioro ampliado 2024: provision general adicional **$14.585M**
+- Base: 10% del ingreso promedio mensual presupuestado 2025.
+- Efecto: prudente, pero reduce utilidades.
+
+**7. Otras notas**
+- Inversiones USD: **$127.700M**; ganancia por devaluacion: **$6.843M**.
+- Donaciones: **$4.991M** (vs $1.028M), foco en investigacion.
+- Episodios 2022: 1.255.144; ingresos 2024 crecieron 12,14%.
+""",
+        "dime clinica neurocardiovascular": """
+**Informacion general**
+- Fundacion: 25 de enero de 1988 (mas de 35 anos de experiencia)
+- Ubicacion: Avenida 5 Norte #20-75, Cali, Valle del Cauca
+- Empleados: 417 personas (2025)
+- Especializacion: clinica de alta complejidad en enfermedades neurocardiovasculares
+- Subsidiarias: DIME Cardiovascular S.A. (51%) y DIME Angiografia S.A. (10%)
+
+**Eventos relevantes para analisis financiero**
+
+**1. Acreditacion en salud - ICONTEC (2019-2023)**
+- Primera acreditacion: enero 2019 (44 instituciones acreditadas en Colombia).
+- Reconocimientos 2019-2023: Medalla Santiago de Cali, Merito Civico, Merito Vallecaucano.
+- Renovacion junio 2023: ratificada por ICONTEC.
+- Impacto: inversion sostenida en estandarizacion, capacitacion y mejoramiento continuo.
+
+**2. Desarrollo de programas especializados**
+- CACI activos desde 2019: insuficiencia cardiaca, trasplante cardiaco, sindrome coronario agudo, ataque cerebrovascular (WSO).
+- Trasplante cardiaco: una de 10 instituciones autorizadas en Colombia; una de 3 en Cali.
+- Impacto financiero: alto costo operativo, insumos especializados y equipo multidisciplinario.
+
+**3. Tecnologia e inversiones**
+- Equipos de alta tecnologia (desde 2007): angiografia avanzada, 3D roadmapping, Expert CT, escaner multicorte 64, resonancia magnetica, mamografia digital, densitometria.
+- 2023-2024: sin informacion publica detallada; el sector ha tenido restricciones presupuestarias.
+
+**4. Programas y servicios nuevos**
+- PAINT (atencion integral nutricional)
+- "Pierde peso, gana vida" (obesidad)
+- Programa de riesgo cardiovascular
+- Estrategia "Corazon a Corazon" (humanizacion)
+- Grupo de apoyo psicologico "GRASPI"
+- Plan de beneficios "Dime por ti y para todos"
+""",
+    }
+
+    key = norm_key(selected_ips)
+    note = QUALITATIVE_NOTES.get(key)
+    if note is None and ("valle" in key and "lili" in key):
+        note = QUALITATIVE_NOTES.get("fundacion valle del lili")
+    if note is None and "dime" in key:
+        note = QUALITATIVE_NOTES.get("dime clinica neurocardiovascular")
+    if note:
+        st.markdown(note)
+    else:
+        st.info("Aun no hay analisis cualitativo para esta IPS.")
+
 
     section_header("Bloques financieros", "Cuentas usadas y valores por año")
     explain_box(
@@ -820,3 +1038,30 @@ with tab_serv:
                 fig.update_layout(title_x=0.5, title_xanchor="center")
                 fig = style_chart(fig)
                 chart_container(fig)
+
+with tab_tarifas:
+    section_header("Tarifas IPS", "Fuente: TarifasCompetencia")
+    explain_box(
+        "Como se calcula",
+        [
+            "Tabla informativa de tarifas por IPS.",
+            "No se usa para calculos del modelo.",
+        ],
+    )
+    if tarifas_comp_df.empty:
+        st.warning("No se pudo leer la hoja TarifasCompetencia.")
+        st.caption(f"Detalle: {tarifas_comp_source}")
+    else:
+        view = tarifas_comp_df.copy()
+        money_cols = [
+            c
+            for c in view.columns
+            if any(token in normalize_text(c) for token in ["tarifa", "precio", "valor", "venta", "costo"])
+        ]
+        if money_cols:
+            st.dataframe(
+                view.style.format({col: fmt_currency for col in money_cols}),
+                use_container_width=True,
+            )
+        else:
+            st.dataframe(view, use_container_width=True)

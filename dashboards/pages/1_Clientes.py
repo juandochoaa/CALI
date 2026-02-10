@@ -1207,20 +1207,25 @@ with tab_analisis:
             }
             display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
 
-            styled = (
-                display_df.round(4).style
-                .background_gradient(
-                    subset=[
-                        "FactorEdad",
-                        "PotencialNormalizado",
-                        "ScoreFinanciero",
-                        "ScoreFinal",
-                        "MarketShareCali",
-                    ],
-                    cmap="Blues",
+            try:
+                import matplotlib  # noqa: F401
+
+                styled = (
+                    display_df.round(4).style
+                    .background_gradient(
+                        subset=[
+                            "FactorEdad",
+                            "PotencialNormalizado",
+                            "ScoreFinanciero",
+                            "ScoreFinal",
+                            "MarketShareCali",
+                        ],
+                        cmap="Blues",
+                    )
                 )
-            )
-            st.dataframe(styled, use_container_width=True)
+                st.dataframe(styled, use_container_width=True)
+            except Exception:
+                st.dataframe(display_df.round(4), use_container_width=True)
 
             # Ranking EPS x Año usando ScoreFinal (solo EPS con Cali)
             section_header("Ranking EPS x Año (Score Final)")
