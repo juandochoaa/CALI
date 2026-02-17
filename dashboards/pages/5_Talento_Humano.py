@@ -1,16 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
-from pathlib import Path
 import unicodedata
+from pathlib import Path
 from typing import List
 
 import pandas as pd
 import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps
-from dashboards.ui import apply_theme, append_total_row, divider, explain_box, page_header, section_header
-
+from dashboards.ui import (
+    apply_theme,
+    bullet_card,
+    explain_box,
+    insight_cards,
+    page_header,
+    section_header,
+    subsection_selector,
+    takeaway_box,
+    text_card,
+)
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
@@ -71,67 +80,122 @@ def add_total_and_avg_row(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
     return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
 
 
-section_header("Base de talento humano", "Fuente: hoja TH")
-explain_box(
-    "Como se calcula",
-    [
-        "Se carga la hoja TH del Excel Cali ANALISIS.",
-        "Se eliminan filas y columnas vacias.",
-        "Se agrega fila TOTAL (sumas) y PROMEDIO en columnas tipo porcentaje.",
-    ],
-)
-
 th_df, th_source = load_cifras_eps("TH")
-if th_df.empty:
-    st.warning("No se pudo leer la hoja TH.")
-    st.caption(f"Detalle: {th_source}")
-    st.stop()
 
-work = th_df.copy()
-work = work.dropna(axis=0, how="all").dropna(axis=1, how="all")
-cols = [str(c) for c in work.columns]
-label_col = (
-    find_col(cols, ["categoria"])
-    or find_col(cols, ["cargo"])
-    or find_col(cols, ["perfil"])
-    or find_col(cols, ["programa"])
-    or cols[0]
+view = subsection_selector(
+    ["Resumen", "Base de talento", "Notas"],
+    key="talento_view",
+    label="Vista",
 )
-work[label_col] = work[label_col].astype(str).str.strip()
 
-view = add_total_and_avg_row(work, label_col)
+if view == "Resumen":
+    section_header("Panorama de talento", "Lectura ejecutiva")
+    explain_box(
+        "Como se calcula",
+        [
+            "Resumen narrativo de disponibilidad y formacion.",
+            "No modifica calculos ni transformaciones.",
+        ],
+    )
+    insight_cards(
+        [
+            (
+                "Oferta local",
+                "La region tiene base academica y clinica para perfiles cardio-cerebro-vasculares.",
+            ),
+            (
+                "Riesgo de cobertura",
+                "Los perfiles de alta especializacion deben planearse con anticipacion por curva de formacion.",
+            ),
+            (
+                "Accion recomendada",
+                "Consolidar convenios universidad-hospital para asegurar embudo de talento en fases de crecimiento.",
+            ),
+        ],
+        columns=3,
+    )
+    bullet_card(
+        "Frentes de gestion",
+        [
+            "Mapear especialidades y subespecialidades criticas.",
+            "Definir estrategia de atraccion y retencion por perfil.",
+            "Alinear formacion clinica con capacidad instalada proyectada.",
+        ],
+    )
 
-numeric_cols = []
-fmt = {}
-for col in view.columns:
-    if col == label_col:
-        continue
-    series = pd.to_numeric(view[col], errors="coerce")
-    if series.notna().any():
-        numeric_cols.append(col)
-        if is_pct_col(col):
-            fmt[col] = lambda v: "" if pd.isna(v) else (f"{v:.2%}" if abs(v) <= 1.5 else f"{v:,.2f}%")
-        else:
-            fmt[col] = lambda v: "" if pd.isna(v) else f"{v:,.0f}"
+elif view == "Base de talento":
+    section_header("Base de talento humano", "Fuente: hoja TH")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se carga la hoja TH del Excel Cali ANALISIS.",
+            "Se eliminan filas y columnas vacias.",
+            "Se agrega fila TOTAL (sumas) y PROMEDIO en columnas tipo porcentaje.",
+        ],
+    )
 
-st.caption(f"Fuente: {th_source}")
-if numeric_cols:
-    st.dataframe(view.style.format(fmt), use_container_width=True)
+    if th_df.empty:
+        st.warning("No se pudo leer la hoja TH.")
+        st.caption(f"Detalle: {th_source}")
+        st.stop()
+
+    work = th_df.copy()
+    work = work.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    cols = [str(c) for c in work.columns]
+    label_col = (
+        find_col(cols, ["categoria"])
+        or find_col(cols, ["cargo"])
+        or find_col(cols, ["perfil"])
+        or find_col(cols, ["programa"])
+        or cols[0]
+    )
+    work[label_col] = work[label_col].astype(str).str.strip()
+
+    view_df = add_total_and_avg_row(work, label_col)
+
+    numeric_cols = []
+    fmt = {}
+    for col in view_df.columns:
+        if col == label_col:
+            continue
+        series = pd.to_numeric(view_df[col], errors="coerce")
+        if series.notna().any():
+            numeric_cols.append(col)
+            if is_pct_col(col):
+                fmt[col] = lambda v: "" if pd.isna(v) else (f"{v:.2%}" if abs(v) <= 1.5 else f"{v:,.2f}%")
+            else:
+                fmt[col] = lambda v: "" if pd.isna(v) else f"{v:,.0f}"
+
+    st.caption(f"Fuente: {th_source}")
+    if numeric_cols:
+        st.dataframe(view_df.style.format(fmt), width='stretch')
+    else:
+        st.dataframe(view_df, width='stretch')
+
 else:
-    st.dataframe(view, use_container_width=True)
-
-divider()
-section_header("Notas de interpretacion", "Como leer la tabla")
-explain_box(
-    "Como se calcula",
-    [
-        "TOTAL suma columnas con datos aditivos (personas, cupos, vacantes).",
-        "PROMEDIO se usa solo para columnas tipo porcentaje.",
-        "Si una columna representa porcentajes en 0-100, se mantiene el valor.",
-    ],
-)
-st.markdown(
-    "- Ajusta la lectura de porcentajes segun la escala utilizada en la hoja TH.\n"
-    "- Esta seccion se ampliara si agregas mas campos o subtablas."
-)
+    section_header("Notas de interpretacion", "Como leer la tabla")
+    explain_box(
+        "Como se calcula",
+        [
+            "TOTAL suma columnas con datos aditivos (personas, cupos, vacantes).",
+            "PROMEDIO se usa solo para columnas tipo porcentaje.",
+            "Si una columna representa porcentajes en 0-100, se mantiene el valor.",
+        ],
+    )
+    text_card(
+        "Lectura sugerida",
+        "Valida la escala de cada columna antes de interpretar porcentajes o comparativos entre perfiles.",
+    )
+    bullet_card(
+        "Buenas practicas",
+        [
+            "Separar indicadores de volumen y de eficiencia en visualizaciones diferentes.",
+            "Mantener definiciones consistentes para porcentaje, tasa y conteo.",
+            "Documentar supuestos de disponibilidad por especialidad.",
+        ],
+    )
+    takeaway_box(
+        "Siguiente paso",
+        "Cuando agregues nuevas subtablas de talento, usa este mismo formato: resumen, evidencia y notas.",
+    )
 

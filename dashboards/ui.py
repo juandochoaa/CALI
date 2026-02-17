@@ -1,8 +1,9 @@
 ﻿from __future__ import annotations
 
+from html import escape
+
 import pandas as pd
 import streamlit as st
-
 
 _THEME_CSS = """
 <style>
@@ -135,6 +136,75 @@ div[data-testid="stMetric"] > label {
   padding: 12px 12px 6px 12px;
   box-shadow: 0 12px 26px rgba(11, 31, 31, 0.1);
 }
+
+.text-card {
+  background: var(--panel-2);
+  border: 1px solid var(--stroke);
+  border-radius: 16px;
+  padding: 14px 16px;
+  box-shadow: 0 10px 22px rgba(11, 31, 31, 0.08);
+  margin-bottom: 12px;
+}
+
+.text-card .card-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--accent-2);
+  margin-bottom: 6px;
+}
+
+.text-card .card-body {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.text-card ul {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.text-card li {
+  margin-bottom: 5px;
+}
+
+.takeaway {
+  background: linear-gradient(120deg, rgba(15, 106, 98, 0.12), rgba(194, 84, 22, 0.12));
+  border: 1px solid var(--stroke);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin: 8px 0 14px 0;
+}
+
+.takeaway .takeaway-title {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--ink);
+  margin-bottom: 6px;
+}
+
+.takeaway .takeaway-body {
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.view-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--accent-2);
+  margin: 4px 0 4px 0;
+}
+
+div[data-testid="stRadio"] > div {
+  background: var(--panel-2);
+  border: 1px solid var(--stroke);
+  border-radius: 12px;
+  padding: 4px 8px;
+}
 </style>
 """
 
@@ -192,8 +262,66 @@ def style_chart(fig):
 
 def chart_container(fig, use_container_width: bool = True) -> None:
     st.markdown("<div class='plot-container'>", unsafe_allow_html=True)
-    st.plotly_chart(fig, use_container_width=use_container_width)
+    chart_width = "stretch" if use_container_width else "content"
+    st.plotly_chart(fig, width=chart_width)
     st.markdown("</div>", unsafe_allow_html=True)
+
+
+def text_card(title: str, body: str) -> None:
+    safe_title = escape(title)
+    safe_body = escape(body).replace("\n", "<br>")
+    st.markdown(
+        (
+            "<div class='text-card'>"
+            f"<div class='card-title'>{safe_title}</div>"
+            f"<div class='card-body'>{safe_body}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def bullet_card(title: str, bullets: list[str]) -> None:
+    if not bullets:
+        return
+    safe_title = escape(title)
+    items = "".join([f"<li>{escape(item)}</li>" for item in bullets])
+    st.markdown(
+        (
+            "<div class='text-card'>"
+            f"<div class='card-title'>{safe_title}</div>"
+            f"<div class='card-body'><ul>{items}</ul></div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def insight_cards(items: list[tuple[str, str]], columns: int = 3) -> None:
+    if not items:
+        return
+    col_count = max(1, min(columns, len(items)))
+    cols = st.columns(col_count)
+    for idx, (title, body) in enumerate(items):
+        with cols[idx % col_count]:
+            text_card(title, body)
+
+
+def takeaway_box(title: str, body: str) -> None:
+    st.markdown(
+        (
+            "<div class='takeaway'>"
+            f"<div class='takeaway-title'>{escape(title)}</div>"
+            f"<div class='takeaway-body'>{escape(body).replace('\n', '<br>')}</div>"
+            "</div>"
+        ),
+        unsafe_allow_html=True,
+    )
+
+
+def subsection_selector(options: list[str], key: str, label: str = "Vista") -> str:
+    st.markdown(f"<div class='view-label'>{escape(label)}</div>", unsafe_allow_html=True)
+    return st.radio(label, options, index=0, horizontal=True, key=key, label_visibility="collapsed")
 
 
 def explain_box(title: str, bullets: list[str]) -> None:

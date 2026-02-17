@@ -10,7 +10,6 @@ from src.data.eps_excel import (
     load_eps_financials,
 )
 
-
 ROOT = Path(".")
 RAW = ROOT / "data" / "raw"
 OUT = ROOT / "data" / "processed"

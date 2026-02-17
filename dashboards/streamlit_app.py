@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -10,8 +10,16 @@ if str(ROOT_DIR) not in sys.path:
 import streamlit as st
 
 from dashboards.data_loader import load_capacidad_objetivo
-from dashboards.ui import apply_theme, append_total_row, explain_box, page_header, section_header
-
+from dashboards.ui import (
+    append_total_row,
+    apply_theme,
+    bullet_card,
+    insight_cards,
+    page_header,
+    section_header,
+    takeaway_box,
+    text_card,
+)
 
 st.set_page_config(page_title="Resumen", layout="wide")
 apply_theme()
@@ -22,126 +30,127 @@ page_header(
     "Resumen",
 )
 
-section_header("Proyecto")
-explain_box(
-    "Como se calcula",
-    [
-        "Seccion descriptiva del alcance del proyecto.",
-        "No hay calculos, solo contexto del hospital propuesto.",
-    ],
-)
-st.markdown("**Proyecto:** Hospital Cardio-Cerebro-Vascular en Cali")
-st.markdown(
-    "**Descripcion:** Creacion de un hospital especializado en atencion cardiovascular y "
-    "cerebrovascular en la ciudad de Cali, con cobertura para el Valle del Cauca."
+
+tab_proyecto, tab_demanda, tab_competencia, tab_talento = st.tabs(
+    ["Proyecto", "Demanda", "Competencia", "Talento"]
 )
 
-section_header("Capacidad")
-explain_box(
-    "Como se calcula",
-    [
-        "Capacidad inicial instalada definida por el proyecto.",
-        "Cantidades por equipo y camas (valores absolutos).",
-    ],
-)
-cap_df = load_capacidad_objetivo()
-cap_df = append_total_row(cap_df, "Equipo", ["Cantidad"])
-st.dataframe(cap_df, use_container_width=False, hide_index=True)
+with tab_proyecto:
+    section_header("Proyecto", "Vision general y alcance")
+    insight_cards(
+        [
+            (
+                "Proposito",
+                "Hospital especializado en atencion cardio-cerebro-vascular para Cali y Valle del Cauca.",
+            ),
+            (
+                "Cobertura",
+                "Mercado objetivo concentrado en Cali con alcance regional para alta complejidad.",
+            ),
+            (
+                "Enfoque",
+                "Integrar demanda potencial, competencia y talento para validar viabilidad integral.",
+            ),
+        ],
+        columns=3,
+    )
+    takeaway_box(
+        "Resumen ejecutivo",
+        "El proyecto combina posicionamiento geografico, capacidad instalada y especializacion clinica.",
+    )
 
-section_header("Alcance Geografico")
-explain_box(
-    "Como se calcula",
-    [
-        "Definicion del mercado geografico objetivo.",
-        "No hay calculos.",
-    ],
-)
-st.markdown("Valle del Cauca con enfasis en Cali.")
+    section_header("Capacidad objetivo", "Dotacion inicial propuesta")
+    cap_df = load_capacidad_objetivo()
+    cap_df = append_total_row(cap_df, "Equipo", ["Cantidad"])
+    st.dataframe(cap_df, width='content', hide_index=True)
 
-section_header("Analisis de Demanda")
-explain_box(
-    "Como se calcula",
-    [
-        "Resumen de frentes de analisis: EPS, poblacion, prevalencia y afiliacion.",
-        "No hay calculos en esta seccion.",
-    ],
-)
-st.markdown("**EPS y Pagadores**")
-st.markdown("Objetivo: identificar viabilidad financiera del mercado.")
-st.markdown(
-    """
-- Identificacion de EPS presentes en Cali y Valle
-- Valoracion financiera de las EPS (estados financieros, liquidez, riesgo de pago)
-- Revisar cuentas contables para el dashboard Juan David
-- Capacidad de contratacion para servicios de alta complejidad
-"""
-)
+    text_card(
+        "Alcance geografico",
+        "Valle del Cauca, con enfasis operativo y comercial en Cali.",
+    )
 
-st.markdown("**Poblacion Objetivo**")
-st.markdown("Objetivo: estimar el volumen potencial de pacientes.")
-st.markdown(
-    """
-- Tamano de la poblacion en Cali y Valle del Cauca
-- Prevalencia de enfermedad cardiovascular y enfermedad cerebrovascular
-- Cifras de afiliacion en Salud
-"""
-)
+with tab_demanda:
+    section_header("Analisis de demanda", "Frentes de evaluacion")
+    insight_cards(
+        [
+            (
+                "EPS y pagadores",
+                "Analizar capacidad de pago, liquidez y contratacion para servicios de alta complejidad.",
+            ),
+            (
+                "Poblacion objetivo",
+                "Estimar pacientes potenciales con base en afiliacion y prevalencia cardio-cerebro-vascular.",
+            ),
+            (
+                "Proyeccion comercial",
+                "Definir potencial de ingresos usando pro rata y comparativos entre regiones.",
+            ),
+        ],
+        columns=3,
+    )
+    bullet_card(
+        "Lineas de trabajo",
+        [
+            "Identificar EPS prioritarias en Cali y Valle.",
+            "Cruzar afiliacion, prevalencia y estructura demografica.",
+            "Proyectar ventas con supuestos trazables y comparables.",
+        ],
+    )
 
-st.markdown("**Proyeccion ventas**")
-st.markdown("Objetivo: estimar ingresos esperados.")
-st.markdown(
-    """
-- Analisis pro rata con base en poblacion Santander sabiendo que existe comuneros, HIC y FCV (Ratio)
-"""
-)
+with tab_competencia:
+    section_header("Analisis de la competencia", "Capacidad instalada y posicionamiento")
+    insight_cards(
+        [
+            (
+                "Infraestructura",
+                "Revisar angiografos, quirofanos, camas y oferta de alta complejidad por competidor.",
+            ),
+            (
+                "Solidez financiera",
+                "Comparar estados financieros y desempeno operativo por institucion.",
+            ),
+        ],
+        columns=2,
+    )
+    bullet_card(
+        "Instituciones a revisar",
+        [
+            "Fundacion Valle de Lili",
+            "Clinica Imbanaco",
+            "Angiografia de Occidente",
+            "DIME Clinica Neurocardiovascular",
+            "Cardioprevent",
+            "Corazon y Aorta",
+            "Instituto Diagnostico",
+        ],
+    )
 
-section_header("Analisis de la Competencia")
-explain_box(
-    "Como se calcula",
-    [
-        "Lista de competidores y variables a revisar (dotacion y EEFF).",
-        "No hay calculos en esta seccion.",
-    ],
-)
-st.markdown("Objetivo: entender la capacidad instalada y el posicionamiento actual.")
-st.markdown(
-    """
-- Revisar numeros de angiografos, quirofanos, camas, estados financieros
-- Fundacion Valle de Lili
-- Clinica Imbanaco
-- Angiografia de Occidente
-- Otros
-- Dime Clinica Neurocardiovascular S.A.
-- Cardioprevent (diagnostico)
-- Corazon y aorta
-- Instituto Diagnostico (diagnostico, solo dos anos)
-"""
-)
+with tab_talento:
+    section_header("Talento humano", "Disponibilidad de especialistas")
+    insight_cards(
+        [
+            (
+                "Oferta academica",
+                "Identificar universidades con programas de cardiologia, neurocirugia y subespecialidades.",
+            ),
+            (
+                "Cantera clinica",
+                "Mapear hospitales formadores y convenios docentes en la region.",
+            ),
+            (
+                "Riesgo de dotacion",
+                "Detectar brechas de perfiles criticos para apertura y escalamiento.",
+            ),
+        ],
+        columns=3,
+    )
+    bullet_card(
+        "Referencias iniciales",
+        [
+            "Univalle - Cirugia vascular periferica.",
+            "Univalle - Especializacion en neurocirugia.",
+            "Univalle - Especializacion en cardiologia.",
+            "Hospitales universitarios de la region y convenios con Clinica DIME.",
+        ],
+    )
 
-section_header("Analisis del Talento Humano")
-explain_box(
-    "Como se calcula",
-    [
-        "Resumen de fuentes y universidades para talento especializado.",
-        "No hay calculos en esta seccion.",
-    ],
-)
-st.markdown("Objetivo: evaluar disponibilidad de personal especializado.")
-st.markdown("**Formacion Academica**")
-st.markdown(
-    """
-- Universidades que ofrecen Cardiologia, Cardiologia intervencionista
-  - https://salud.univalle.edu.co/la-universidad/horarios-de-atencion/28-especializaciones-clinicas/239-cirugia-vascular-periferica
-- Universidades que ofrecen programas de residencia y subespecializacion
-  - https://salud.univalle.edu.co/especializacion-en-neurocirugia
-  - https://salud.univalle.edu.co/especializacion-en-cardiologia
-"""
-)
-
-st.markdown("**Hospitales Universitarios**")
-st.markdown(
-    """
-- Hospitales formadores en la region
-- Convenios educativos - Clinica DIME
-"""
-)

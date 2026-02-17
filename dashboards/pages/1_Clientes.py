@@ -1,28 +1,23 @@
 ﻿from __future__ import annotations
 
+import re
 import sys
+import unicodedata
 from pathlib import Path
+from typing import List
+
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import streamlit as st
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-
-import re
-import unicodedata
-from typing import Dict, List, Tuple
-
-import numpy as np
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-import streamlit as st
-
-from dashboards.data_loader import load_cifras_eps, load_eps_financials
 from dashboards.ui import (
-    apply_theme,
-    append_avg_column,
     append_total_row,
+    apply_theme,
     chart_container,
     divider,
     explain_box,
@@ -30,106 +25,38 @@ from dashboards.ui import (
     section_header,
     style_chart,
 )
-from src.models.eps_scoring import (
-    BLOCK_DEFS,
-    RATIO_SPECS,
-    apply_size_factors,
-    aggregate_scores,
-    build_blocks_long,
-    compute_ratios,
-    compute_net_income_factor,
-    compute_revenue_factor,
-    score_ratios,
-    winsorize_ratios,
+from src.models.eps_montecarlo import (
+    EPS_OBJ_DEFAULT,
+    PROBABILITY_COLUMNS,
+    build_composite_ranking,
+    build_income_statement_view,
+    compute_market_share_valle,
+    impute_missing_probabilities,
+    run_eps_montecarlo,
+    score_risk_percentiles,
 )
-
 
 st.set_page_config(page_title="Clientes", layout="wide")
 apply_theme()
 
 page_header(
     "Clientes",
-    "Indicadores financieros y scoring basados en los estados de las EPS.",
-    "EPS financials",
+    "Ranking EPS por riesgo Monte Carlo y mercado en Valle del Cauca.",
+    "EPS Monte Carlo",
 )
 
-PAGE_ID = "clientes"
-DEFAULT_WEIGHTS = {
-    "liquidity": 30,
-    "solvency": 30,
-    "profitability": 20,
-    "efficiency": 20,
-}
-if st.session_state.get("active_page") != PAGE_ID:
-    st.session_state["active_page"] = PAGE_ID
-    st.session_state["clientes_weight_liquidity"] = DEFAULT_WEIGHTS["liquidity"]
-    st.session_state["clientes_weight_solvency"] = DEFAULT_WEIGHTS["solvency"]
-    st.session_state["clientes_weight_profitability"] = DEFAULT_WEIGHTS["profitability"]
-    st.session_state["clientes_weight_efficiency"] = DEFAULT_WEIGHTS["efficiency"]
 
-with st.sidebar:
-    st.header("Filters")
-    st.caption("Archivo EPS: Cali ANALISIS.xlsx (hoja EPS EEFF)")
-    k_age = st.number_input("k (FactorEdad)", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
-    st.caption(
-        "Nota: k controla cuánto pesan los grupos de mayor edad; a mayor k, más peso para edades altas."
-    )
-    st.subheader("Pesos del Score Financiero")
-    w_liquidity = st.slider(
-        "Liquidez (%)",
-        0,
-        100,
-        key="clientes_weight_liquidity",
-    )
-    w_solvency = st.slider(
-        "Endeudamiento (%)",
-        0,
-        100,
-        key="clientes_weight_solvency",
-    )
-    w_profitability = st.slider(
-        "Rentabilidad (%)",
-        0,
-        100,
-        key="clientes_weight_profitability",
-    )
-    w_efficiency = st.slider(
-        "Eficiencia (%)",
-        0,
-        100,
-        key="clientes_weight_efficiency",
-    )
-
-section_header("Datos fuente", "EPS")
-explain_box(
-    "Como se calcula",
-    [
-        "Fuente principal: Cali ANALISIS.xlsx (hoja EPS EEFF y EPS_Edad/EPS_Afiliados).",
-        "Se estandarizan nombres de EPS para unificar cruces entre tablas.",
-        "Las cuentas contables se agregan por año.",
-    ],
-)
-
-eps_df, eps_source = load_eps_financials("EPS EEFF")
-age_df, age_source = load_cifras_eps("EPS_Edad")
-mun_df, mun_source = load_cifras_eps("EPS_Afiliados")
-
-
-def normalize_account(text: str) -> str:
+def normalize_account(text: object) -> str:
     normalized = unicodedata.normalize("NFKD", str(text))
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
-    normalized = " ".join(normalized.lower().split())
-    return normalized
+    return " ".join(normalized.lower().split())
 
 
-def normalize_eps_name(text: str) -> str:
-    cleaned = normalize_account(text)
-    cleaned = cleaned.replace(".xlsx", "").strip()
-    cleaned = " ".join(cleaned.split())
-    return cleaned
+def normalize_sheet_name(text: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", normalize_account(text))
 
 
-def parse_age_group(text: str) -> str | None:
+def parse_age_group(text: object) -> str | None:
     if not isinstance(text, str):
         return None
     normalized = normalize_account(text)
@@ -137,9 +64,7 @@ def parse_age_group(text: str) -> str | None:
         return "80+"
     nums = re.findall(r"\d+", normalized)
     if len(nums) >= 2:
-        start = int(nums[0])
-        end = int(nums[1])
-        return f"{start}-{end}"
+        return f"{int(nums[0])}-{int(nums[1])}"
     return None
 
 
@@ -151,363 +76,53 @@ def find_col(columns: List[str], includes: List[str]) -> str | None:
     return None
 
 
-def valle_eps_keys_from_mun(df: pd.DataFrame) -> set[str] | None:
-    if df.empty:
+def risk_bucket(score: float | None) -> str:
+    if score is None or pd.isna(score):
+        return "Sin dato"
+    if score >= 70:
+        return "Bajo riesgo"
+    if score >= 50:
+        return "Riesgo medio"
+    return "Alto riesgo"
+
+
+def load_cali_sheet(aliases: List[str]) -> tuple[pd.DataFrame, str]:
+    path = ROOT_DIR / "data" / "raw" / "Cali ANALISIS.xlsx"
+    if not path.exists():
+        alt = ROOT_DIR / "Cali ANALISIS.xlsx"
+        if alt.exists():
+            path = alt
+    if not path.exists():
+        return pd.DataFrame(), "Archivo no encontrado: Cali ANALISIS.xlsx"
+
+    try:
+        xls = pd.ExcelFile(path)
+    except Exception as exc:
+        return pd.DataFrame(), f"No se pudo abrir Cali ANALISIS.xlsx: {exc}"
+
+    normalized_sheet_map = {normalize_sheet_name(s): s for s in xls.sheet_names}
+    selected_sheet = None
+    for alias in aliases:
+        key = normalize_sheet_name(alias)
+        if key in normalized_sheet_map:
+            selected_sheet = normalized_sheet_map[key]
+            break
+    if selected_sheet is None:
+        return pd.DataFrame(), f"No se encontro hoja para aliases {aliases}. Disponibles: {xls.sheet_names}"
+
+    try:
+        df = pd.read_excel(path, sheet_name=selected_sheet)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df, f"Excel: {path.name} (hoja {selected_sheet})"
+    except Exception as exc:
+        return pd.DataFrame(), f"Error leyendo hoja {selected_sheet}: {exc}"
+
+
+def affiliates_55_table(age_df: pd.DataFrame) -> pd.DataFrame | None:
+    if age_df.empty:
         return None
-    cols = [str(c) for c in df.columns]
-    dept_col = find_col(cols, ["departamento"])
-    eps_col = find_col(cols, ["eps"])
-    if not dept_col or not eps_col:
-        return None
-    work = df[[dept_col, eps_col]].copy()
-    work[dept_col] = work[dept_col].astype(str)
-    work = work[work[dept_col].str.contains("valle del cauca", case=False, na=False)]
-    if work.empty:
-        return None
-    eps_keys = work[eps_col].astype(str).str.strip().map(normalize_eps_name).dropna().unique().tolist()
-    return set(eps_keys)
 
-
-def fmt_ratio(value: float | None, kind: str) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "NA"
-    if kind == "percent":
-        return f"{value * 100:.1f}%"
-    if kind == "days":
-        return f"{value:,.0f} dias"
-    if kind == "x":
-        return f"{value:.2f}x"
-    return f"{value:,.2f}"
-
-
-def fmt_currency_millions(value: float | None) -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "NA"
-    return f"${value:,.0f}"
-
-
-def compute_delta(curr: float | None, prev: float | None) -> float | None:
-    if curr is None or prev is None:
-        return None
-    if pd.isna(curr) or pd.isna(prev) or prev == 0:
-        return None
-    delta = (curr - prev) / abs(prev)
-    if pd.isna(delta):
-        return None
-    return float(delta)
-
-
-def distance_to_range(value: float | None, low: float = 20, high: float = 60) -> float | None:
-    if value is None or pd.isna(value):
-        return None
-    if low <= value <= high:
-        return 0.0
-    if value < low:
-        return float(low - value)
-    return float(value - high)
-
-
-def improvement_flag(
-    curr: float | None,
-    prev: float | None,
-    direction: str,
-    low: float = 20,
-    high: float = 60,
-) -> float | None:
-    if curr is None or prev is None:
-        return None
-    if pd.isna(curr) or pd.isna(prev) or prev == 0:
-        return None
-    if direction == "higher":
-        if curr > prev:
-            return 1.0
-        if curr < prev:
-            return -1.0
-        return 0.0
-    if direction == "lower":
-        if curr < prev:
-            return 1.0
-        if curr > prev:
-            return -1.0
-        return 0.0
-    if direction == "range":
-        dist_curr = distance_to_range(curr, low, high)
-        dist_prev = distance_to_range(prev, low, high)
-        if dist_curr is None or dist_prev is None:
-            return None
-        if dist_curr < dist_prev:
-            return 1.0
-        if dist_curr > dist_prev:
-            return -1.0
-        return 0.0
-    return None
-
-
-def style_ratio_table(
-    df: pd.DataFrame, flags_df: pd.DataFrame, delta_cols: List[str]
-) -> pd.io.formats.style.Styler:
-    def fmt_delta(val: float | None) -> str:
-        if val is None or (isinstance(val, float) and pd.isna(val)):
-            return ""
-        if val > 0:
-            return f"▲ {val * 100:.1f}%"
-        if val < 0:
-            return f"▼ {abs(val) * 100:.1f}%"
-        return "0.0%"
-
-    def _style_row(row: pd.Series) -> List[str]:
-        styles = []
-        for col in row.index:
-            if col in delta_cols:
-                flag = None
-                if col in flags_df.columns and row.name in flags_df.index:
-                    flag = flags_df.loc[row.name, col]
-                if flag is None or (isinstance(flag, float) and pd.isna(flag)) or flag == 0:
-                    styles.append("")
-                elif flag > 0:
-                    styles.append("color: #0f6a62; font-weight: 600;")
-                else:
-                    styles.append("color: #c92a2a; font-weight: 600;")
-            else:
-                styles.append("")
-        return styles
-
-    styled = df.style.format({col: fmt_delta for col in delta_cols})
-    styled = styled.apply(_style_row, axis=1)
-    return styled
-
-
-INTERVENED_KEYWORDS = [
-    "nueva eps",
-    "sanitas",
-    "sos",
-    "famisanar",
-    "asmetsalud",
-    "emssanar",
-    "coosalud",
-    "eps familiar",
-]
-
-WARM_COLORS = ["#c92a2a", "#e8590c", "#f08c00", "#d9480f", "#ff922b", "#fa5252"]
-COOL_COLORS = ["#0f6a62", "#1c7ed6", "#2f4858", "#228be6", "#0b7285", "#4c6ef5"]
-
-EXCLUDED_EPS = [
-    "ferronales",
-    "ferronales - eas",
-    "asmetsalud",
-    "asmet salud",
-    "comfenalco valle",
-    "comfenalco valle eps",
-    "eps familiar",
-    "eps familiar de colombia",
-]
-EXCLUDED_EPS_KEYS = {normalize_eps_name(name) for name in EXCLUDED_EPS}
-
-
-def is_intervened_eps(name: str) -> bool:
-    norm = normalize_eps_name(name)
-    compact = re.sub(r"[^a-z0-9]+", "", norm)
-    for key in INTERVENED_KEYWORDS:
-        if key in norm:
-            return True
-        key_compact = re.sub(r"[^a-z0-9]+", "", key)
-        if key_compact and key_compact in compact:
-            return True
-    return False
-
-
-def is_excluded_eps(name: str) -> bool:
-    norm = normalize_eps_name(name)
-    if norm in EXCLUDED_EPS_KEYS:
-        return True
-    compact = re.sub(r"[^a-z0-9]+", "", norm)
-    for key in EXCLUDED_EPS_KEYS:
-        if key in norm:
-            return True
-        key_compact = re.sub(r"[^a-z0-9]+", "", key)
-        if key_compact and key_compact in compact:
-            return True
-    return False
-
-
-def build_color_map(names: List[str]) -> Dict[str, str]:
-    color_map: Dict[str, str] = {}
-    warm_i = 0
-    cool_i = 0
-    for name in names:
-        if is_intervened_eps(name):
-            color_map[name] = WARM_COLORS[warm_i % len(WARM_COLORS)]
-            warm_i += 1
-        else:
-            color_map[name] = COOL_COLORS[cool_i % len(COOL_COLORS)]
-            cool_i += 1
-    return color_map
-
-
-def apply_line_chart_style(fig: go.Figure, legend_title: str = "EPS") -> go.Figure:
-    fig = style_chart(fig)
-    fig.update_layout(
-        showlegend=True,
-        legend_title_text=legend_title,
-        legend=dict(
-            orientation="h",
-            x=0.01,
-            xanchor="left",
-            y=0.01,
-            yanchor="bottom",
-            bgcolor="rgba(255,255,255,0.85)",
-            bordercolor="rgba(11,31,31,0.25)",
-            borderwidth=1,
-            font=dict(color="#000000"),
-        ),
-        font=dict(color="#000000"),
-        title_font=dict(size=16, family="Newsreader", color="#000000"),
-        title_x=0.5,
-        title_xanchor="center",
-        margin=dict(l=18, r=18, t=36, b=24),
-    )
-    fig.update_xaxes(tickfont=dict(color="#000000"), title_font=dict(color="#000000"))
-    fig.update_yaxes(tickfont=dict(color="#000000"), title_font=dict(color="#000000"))
-    return fig
-
-
-if eps_df.empty:
-    st.warning("No se encontro el archivo de estados financieros EPS o no se pudo leer.")
-    st.caption(f"Detalle: {eps_source}")
-    st.stop()
-
-valle_eps_keys = valle_eps_keys_from_mun(mun_df)
-
-year_cols = [c for c in eps_df.columns if str(c).strip().isdigit()]
-year_cols = sorted(year_cols, key=lambda x: int(x))
-if not year_cols:
-    st.warning("No se encontraron columnas de anos en la hoja EPS.")
-    st.stop()
-
-if "EPS_clean" not in eps_df.columns and "EPS" in eps_df.columns:
-    eps_df["EPS_clean"] = eps_df["EPS"].astype(str).str.replace(".xlsx", "", regex=False).str.strip()
-
-if "CUENTA" in eps_df.columns:
-    eps_df["CUENTA_norm"] = eps_df["CUENTA"].astype(str).map(normalize_account)
-
-if "EPS_clean" in eps_df.columns:
-    eps_df = eps_df[~eps_df["EPS_clean"].map(is_excluded_eps)]
-    if valle_eps_keys:
-        eps_df["eps_key"] = eps_df["EPS_clean"].map(normalize_eps_name)
-        eps_df = eps_df[eps_df["eps_key"].isin(valle_eps_keys)]
-
-
-eps_list = sorted(eps_df["EPS_clean"].dropna().unique().tolist())
-
-blocks_df = build_blocks_long(eps_df, year_cols)
-blocks_df["net_income_factor"] = compute_net_income_factor(blocks_df)
-blocks_df["revenue_factor"] = compute_revenue_factor(blocks_df)
-ratios_df = compute_ratios(blocks_df)
-ratio_cols = list(RATIO_SPECS.keys())
-wins_df = winsorize_ratios(ratios_df, ratio_cols, lower=0.02, upper=0.98)
-scored_df = score_ratios(wins_df, RATIO_SPECS, dpo_range=(20, 60), dpo_zero=(0, 120))
-weights = {
-    "liquidity": w_liquidity / 100,
-    "solvency": w_solvency / 100,
-    "profitability": w_profitability / 100,
-    "efficiency": w_efficiency / 100,
-}
-weight_sum = sum(weights.values())
-if weight_sum > 0:
-    weights = {k: v / weight_sum for k, v in weights.items()}
-scored_df = aggregate_scores(scored_df, RATIO_SPECS, weights)
-factor_cols = ["net_income_factor", "revenue_factor"]
-if not all(col in scored_df.columns for col in factor_cols):
-    scored_df = scored_df.merge(
-        blocks_df[["entity", "year"] + factor_cols],
-        on=["entity", "year"],
-        how="left",
-    )
-scored_df = apply_size_factors(
-    scored_df, weights, factor_cols=["net_income_factor", "revenue_factor"]
-)
-scored_df["eps_key"] = scored_df["entity"].map(normalize_eps_name)
-scored_df = scored_df[~scored_df["eps_key"].map(is_excluded_eps)]
-
-
-def accounts_used(df: pd.DataFrame, accounts: List[str]) -> str:
-    if "CUENTA_norm" not in df.columns:
-        return "No disponible"
-    account_set = set(df["CUENTA_norm"].dropna())
-    used = [acc for acc in accounts if normalize_account(acc) in account_set]
-    return " + ".join(used) if used else "No disponible"
-
-
-def blocks_table(selected: str) -> pd.DataFrame:
-    df_eps = eps_df[eps_df["EPS_clean"] == selected]
-    rows = []
-    for code, accounts, _, _ in BLOCK_DEFS:
-        row = {"Bloque": code, "Cuenta usada": accounts_used(df_eps, accounts)}
-        subset = blocks_df[(blocks_df["entity"] == selected) & (blocks_df["year"].isin([int(y) for y in year_cols]))]
-        for year in year_cols:
-            value = subset.loc[subset["year"] == int(year), code]
-            row[str(year)] = fmt_currency_millions(value.iloc[0] if not value.empty else None)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def ratio_table(
-    selected: str,
-    ratio_list: List[str],
-    labels: Dict[str, str],
-    kinds: Dict[str, str],
-) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
-    subset = ratios_df[ratios_df["entity"] == selected]
-    rows = []
-    flags_rows = []
-    delta_cols: List[str] = []
-    ordered_cols = ["Indicador"]
-    year_cols_str = [str(y) for y in year_cols]
-    for idx, year in enumerate(year_cols):
-        ordered_cols.append(str(year))
-        if idx > 0:
-            delta_col = f"Δ {year}"
-            ordered_cols.append(delta_col)
-            delta_cols.append(delta_col)
-    ordered_cols.append("Promedio")
-
-    for ratio in ratio_list:
-        row = {"Indicador": labels.get(ratio, ratio)}
-        flags_row: Dict[str, float | None] = {}
-        direction = RATIO_SPECS.get(ratio, {}).get("direction", "higher")
-        numeric_vals: List[float] = []
-        for idx, year in enumerate(year_cols):
-            value = subset.loc[subset["year"] == int(year), ratio]
-            curr = value.iloc[0] if not value.empty else None
-            prev = None
-            if idx > 0:
-                prev_year = year_cols[idx - 1]
-                prev_val = subset.loc[subset["year"] == int(prev_year), ratio]
-                prev = prev_val.iloc[0] if not prev_val.empty else None
-            base = fmt_ratio(curr, kinds.get(ratio, "ratio"))
-            row[str(year)] = base
-            if curr is not None and pd.notna(curr):
-                numeric_vals.append(float(curr))
-            if idx > 0:
-                delta = compute_delta(curr, prev)
-                row[f"Δ {year}"] = delta
-                flags_row[f"Δ {year}"] = improvement_flag(curr, prev, direction)
-        avg_val = np.mean(numeric_vals) if numeric_vals else np.nan
-        row["Promedio"] = fmt_ratio(avg_val, kinds.get(ratio, "ratio"))
-        rows.append(row)
-        flags_rows.append(flags_row)
-
-    data_df = pd.DataFrame(rows).reindex(columns=ordered_cols)
-    if "Promedio" not in data_df.columns:
-        data_df["Promedio"] = None
-    flags_df = pd.DataFrame(flags_rows).reindex(columns=delta_cols)
-    return data_df, flags_df, delta_cols
-
-
-def affiliates_55_table(df: pd.DataFrame) -> pd.DataFrame | None:
-    if df.empty:
-        return None
-    cols = [str(c) for c in df.columns]
+    cols = [str(c) for c in age_df.columns]
     dept_col = find_col(cols, ["departamento"])
     eps_col = find_col(cols, ["eps"])
     age_col = find_col(cols, ["quinquenio", "edad"])
@@ -517,12 +132,13 @@ def affiliates_55_table(df: pd.DataFrame) -> pd.DataFrame | None:
     if not all([dept_col, eps_col, age_col, fem_col, masc_col, total_col]):
         return None
 
-    work = df[[dept_col, eps_col, age_col, fem_col, masc_col, total_col]].copy()
+    work = age_df[[dept_col, eps_col, age_col, fem_col, masc_col, total_col]].copy()
     work[dept_col] = work[dept_col].astype(str)
     work = work[work[dept_col].str.contains("valle del cauca", case=False, na=False)]
-    work["EPS_display"] = work[eps_col].astype(str).str.strip().str.upper()
-    work["eps_key"] = work["EPS_display"].map(normalize_eps_name)
-    work = work[~work["eps_key"].map(is_excluded_eps)]
+    if work.empty:
+        return None
+
+    work["EPS"] = work[eps_col].astype(str).str.strip().str.upper()
     work["age_group"] = work[age_col].map(parse_age_group)
     work = work.dropna(subset=["age_group"])
 
@@ -531,1116 +147,526 @@ def affiliates_55_table(df: pd.DataFrame) -> pd.DataFrame | None:
             return True
         if "-" in group:
             try:
-                start = int(group.split("-")[0])
-                return start >= 55
+                return int(group.split("-")[0]) >= 55
             except ValueError:
                 return False
         return False
 
     work = work[work["age_group"].map(is_55_plus)]
+    if work.empty:
+        return None
+
     for col in [fem_col, masc_col, total_col]:
         work[col] = pd.to_numeric(work[col], errors="coerce")
 
-    summed = (
-        work.groupby("eps_key")[[fem_col, masc_col, total_col]]
+    out = (
+        work.groupby("EPS")[[fem_col, masc_col, total_col]]
         .sum(min_count=1)
         .reset_index()
+        .rename(
+            columns={
+                fem_col: "Femenino",
+                masc_col: "Masculino",
+                total_col: "Total afiliados",
+            }
+        )
+        .sort_values("Total afiliados", ascending=False)
+        .reset_index(drop=True)
     )
-    display = (
-        work.groupby("eps_key")["EPS_display"]
-        .agg(lambda s: s.mode().iloc[0] if not s.mode().empty else s.iloc[0])
-        .reset_index()
-    )
-    merged = summed.merge(display, on="eps_key", how="left")
-    merged = merged.rename(
-        columns={
-            "EPS_display": "EPS",
-            fem_col: "Femenino",
-            masc_col: "Masculino",
-            total_col: "Total afiliados",
-        }
-    )
-    merged = merged[["EPS", "Femenino", "Masculino", "Total afiliados"]]
-    merged = merged.sort_values("Total afiliados", ascending=False)
-    merged = append_total_row(merged, "EPS", ["Femenino", "Masculino", "Total afiliados"])
-    return merged
+    out = append_total_row(out, "EPS", ["Femenino", "Masculino", "Total afiliados"])
+    return out
 
 
-def population_pyramid(df: pd.DataFrame, dept_pattern: str = "valle del cauca") -> pd.DataFrame | None:
-    if df.empty:
-        return None
-    cols = [str(c) for c in df.columns]
-    dept_col = find_col(cols, ["departamento"])
-    age_col = find_col(cols, ["quinquenio", "edad"])
-    fem_col = find_col(cols, ["femenino"])
-    masc_col = find_col(cols, ["masculino"])
-    if not all([dept_col, age_col, fem_col, masc_col]):
+def regimen_valle_table(mun_df: pd.DataFrame) -> pd.DataFrame | None:
+    if mun_df.empty:
         return None
 
-    work = df[[dept_col, age_col, fem_col, masc_col]].copy()
-    work[dept_col] = work[dept_col].astype(str)
-    work = work[work[dept_col].str.contains(dept_pattern, case=False, na=False)]
-    work["age_group"] = work[age_col].map(parse_age_group)
-    work = work.dropna(subset=["age_group"])
-    work[fem_col] = pd.to_numeric(work[fem_col], errors="coerce")
-    work[masc_col] = pd.to_numeric(work[masc_col], errors="coerce")
-    grouped = (
-        work.groupby("age_group")[[fem_col, masc_col]]
-        .sum(min_count=1)
-        .reset_index()
-    )
-
-    def age_order(val: str) -> int:
-        if val == "80+":
-            return 80
-        if "-" in val:
-            return int(val.split("-")[0])
-        return 0
-
-    grouped["order"] = grouped["age_group"].map(age_order)
-    grouped = grouped.sort_values("order", ascending=True)
-    grouped = grouped.rename(columns={fem_col: "Femenino", masc_col: "Masculino"})
-    return grouped[["age_group", "Femenino", "Masculino"]]
-
-
-def population_pyramid_by_eps(df: pd.DataFrame, eps_key: str) -> pd.DataFrame | None:
-    if df.empty:
-        return None
-    cols = [str(c) for c in df.columns]
-    dept_col = find_col(cols, ["departamento"])
+    cols = [str(c) for c in mun_df.columns]
+    dep_col = find_col(cols, ["departamento"])
     eps_col = find_col(cols, ["eps"])
-    age_col = find_col(cols, ["quinquenio", "edad"])
-    fem_col = find_col(cols, ["femenino"])
-    masc_col = find_col(cols, ["masculino"])
-    if not all([dept_col, eps_col, age_col, fem_col, masc_col]):
+    contrib_col = find_col(cols, ["afiliados contributivo"])
+    subs_col = find_col(cols, ["afiliados subsidiado"])
+    esp_col = find_col(cols, ["afiliados especiales", "afiliados excepcion"])
+    total_col = find_col(cols, ["total afiliados"])
+    if not all([dep_col, eps_col, contrib_col, subs_col, total_col]):
         return None
 
-    work = df[[dept_col, eps_col, age_col, fem_col, masc_col]].copy()
-    work[dept_col] = work[dept_col].astype(str)
-    work = work[work[dept_col].str.contains("valle del cauca", case=False, na=False)]
-    work["eps_key"] = work[eps_col].astype(str).map(normalize_eps_name)
-    work = work[work["eps_key"] == eps_key]
+    work = mun_df[[dep_col, eps_col, contrib_col, subs_col, total_col] + ([esp_col] if esp_col else [])].copy()
+    work[dep_col] = work[dep_col].astype(str)
+    work = work[work[dep_col].str.contains("valle del cauca", case=False, na=False)]
     if work.empty:
         return None
-    work["age_group"] = work[age_col].map(parse_age_group)
-    work = work.dropna(subset=["age_group"])
-    work[fem_col] = pd.to_numeric(work[fem_col], errors="coerce")
-    work[masc_col] = pd.to_numeric(work[masc_col], errors="coerce")
-    grouped = (
-        work.groupby("age_group")[[fem_col, masc_col]]
-        .sum(min_count=1)
-        .reset_index()
+
+    work["EPS"] = work[eps_col].astype(str).str.strip().str.upper()
+    for col in [contrib_col, subs_col, total_col] + ([esp_col] if esp_col else []):
+        work[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+
+    agg_cols = [contrib_col, subs_col, total_col] + ([esp_col] if esp_col else [])
+    out = work.groupby("EPS", as_index=False)[agg_cols].sum()
+
+    rename_map = {
+        contrib_col: "Contributivo",
+        subs_col: "Subsidiado",
+        total_col: "Total afiliados",
+    }
+    if esp_col:
+        rename_map[esp_col] = "Especiales/Excepcion"
+    out = out.rename(columns=rename_map)
+
+    for col in ["Contributivo", "Subsidiado", "Especiales/Excepcion"]:
+        if col not in out.columns:
+            out[col] = 0.0
+
+    out = out.sort_values("Total afiliados", ascending=False).reset_index(drop=True)
+    out = append_total_row(
+        out,
+        "EPS",
+        ["Contributivo", "Subsidiado", "Especiales/Excepcion", "Total afiliados"],
+    )
+    return out
+
+
+with st.sidebar:
+    st.header("Monte Carlo EPS")
+    n_sim = int(
+        st.number_input(
+            "Numero de simulaciones",
+            min_value=1_000,
+            max_value=50_000,
+            value=10_000,
+            step=1_000,
+        )
+    )
+    horizon_end = int(
+        st.number_input(
+            "Ano fin de simulacion",
+            min_value=2026,
+            max_value=2040,
+            value=2030,
+            step=1,
+        )
+    )
+    upc_optimism_factor = float(
+        st.slider(
+            "UPC optimism factor",
+            min_value=0.5,
+            max_value=2.0,
+            value=1.2,
+            step=0.05,
+        )
+    )
+    upc_growth_start_year = int(
+        st.number_input("Ano inicio crecimiento UPC", min_value=2010, max_value=2030, value=2019, step=1)
+    )
+    upc_growth_end_year = int(
+        st.number_input("Ano fin crecimiento UPC", min_value=2010, max_value=2035, value=2026, step=1)
     )
 
-    def age_order(val: str) -> int:
-        if val == "80+":
-            return 80
-        if "-" in val:
-            return int(val.split("-")[0])
-        return 0
+    st.subheader("Shocks por escenario")
+    with st.expander("BASE", expanded=False):
+        base_lr_shift = float(st.number_input("BASE LR shift", value=0.00, step=0.01, format="%.2f"))
+        base_g_shift = float(st.number_input("BASE g shift", value=0.00, step=0.01, format="%.2f"))
+    with st.expander("STRESS_LR", expanded=False):
+        stress_lr_shift = float(st.number_input("STRESS_LR LR shift", value=0.05, step=0.01, format="%.2f"))
+        stress_lr_g_shift = float(st.number_input("STRESS_LR g shift", value=0.00, step=0.01, format="%.2f"))
+    with st.expander("STRESS_MIX", expanded=False):
+        stress_mix_lr_shift = float(st.number_input("STRESS_MIX LR shift", value=0.05, step=0.01, format="%.2f"))
+        stress_mix_g_shift = float(st.number_input("STRESS_MIX g shift", value=-0.03, step=0.01, format="%.2f"))
 
-    grouped["order"] = grouped["age_group"].map(age_order)
-    grouped = grouped.sort_values("order", ascending=True)
-    grouped = grouped.rename(columns={fem_col: "Femenino", masc_col: "Masculino"})
-    return grouped[["age_group", "Femenino", "Masculino"]]
+    st.caption("Score final fijo: 80% riesgo Monte Carlo + 20% mercado Valle.")
 
-def get_regimen_pivot(
-    df: pd.DataFrame, eps_keys: List[str] | None = None
-) -> Tuple[pd.DataFrame | None, str | None]:
-    if df.empty:
-        return None, "No hay datos disponibles en EPS_Afiliados."
+scenarios = {
+    "BASE": {"LR_shift": base_lr_shift, "g_shift": base_g_shift},
+    "STRESS_LR": {"LR_shift": stress_lr_shift, "g_shift": stress_lr_g_shift},
+    "STRESS_MIX": {"LR_shift": stress_mix_lr_shift, "g_shift": stress_mix_g_shift},
+}
 
-    cols = [str(c) for c in df.columns]
-    eps_col = find_col(cols, ["eps"])
-    mun_col = find_col(cols, ["municipio"])
-    if not eps_col or not mun_col:
-        return None, "No se encontraron columnas EPS/Municipio en EPS_Afiliados."
+section_header("Datos fuente", "Modelo EPS")
+explain_box(
+    "Como se calcula",
+    [
+        "Se usa Cali ANALISIS.xlsx (hojas: EPS_EEFF, UPC, EPS_Edad, EPS_Anos, EPS_Afiliados).",
+        "Las probabilidades se calculan con Monte Carlo en enfoque PROMEDIO.",
+        "El % de mercado se calcula sobre todo Valle del Cauca (denominador total Valle).",
+    ],
+)
 
-    def find_col_contains(tokens: List[str]) -> str | None:
-        for col in cols:
-            norm = normalize_account(col)
-            if all(tok in norm for tok in tokens):
-                return col
-        return None
+eps_eeff_df, eps_eeff_src = load_cali_sheet(["EPS_EEFF", "EPS EEFF"])
+upc_df, upc_src = load_cali_sheet(["UPC"])
+eps_edad_df, eps_edad_src = load_cali_sheet(["EPS_Edad", "EPS Edad"])
+eps_anos_df, eps_anos_src = load_cali_sheet(["EPS_Años", "EPS_Anos", "EPS Anos", "EPS Anos"])
+eps_afiliados_df, eps_afiliados_src = load_cali_sheet(["EPS_Afiliados", "EPS Afiliados"])
 
-    contrib_col = find_col_contains(["afiliados", "contributivo"])
-    subs_col = find_col_contains(["afiliados", "subsidiado"])
-    esp_col = (
-        find_col_contains(["afiliados", "especial"])
-        or find_col_contains(["afiliados", "excepcion"])
-        or find_col_contains(["afiliados", "excepción"])
+sources_ok = [
+    ("EPS_EEFF", eps_eeff_df, eps_eeff_src),
+    ("UPC", upc_df, upc_src),
+    ("EPS_Edad", eps_edad_df, eps_edad_src),
+    ("EPS_Anos", eps_anos_df, eps_anos_src),
+    ("EPS_Afiliados", eps_afiliados_df, eps_afiliados_src),
+]
+for label, df_src, detail in sources_ok:
+    if df_src.empty:
+        st.error(f"No se pudo cargar {label}. Detalle: {detail}")
+        st.stop()
+
+with st.spinner("Ejecutando simulacion Monte Carlo..."):
+    results_df, diagnostics = run_eps_montecarlo(
+        upc_df=upc_df,
+        eps_eeff_df=eps_eeff_df,
+        eps_edad_df=eps_edad_df,
+        eps_afiliados_hist_df=eps_anos_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+        n_sim=n_sim,
+        horizon_end=horizon_end,
+        cash_thresholds=(15, 0),
+        upc_optimism_factor=upc_optimism_factor,
+        upc_growth_start_year=upc_growth_start_year,
+        upc_growth_end_year=upc_growth_end_year,
+        scenarios=scenarios,
+        random_seed=42,
     )
-    reg_col = find_col(cols, ["regimen", "régimen"])
-    aff_col = find_col(cols, ["afiliados", "total"])
+    market_share_df = compute_market_share_valle(
+        eps_afiliados_df=eps_afiliados_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+    )
+    results_imputed = impute_missing_probabilities(
+        results_df=results_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+        scenarios=list(scenarios.keys()),
+        probability_columns=PROBABILITY_COLUMNS,
+    )
+    results_scored = score_risk_percentiles(
+        df=results_imputed,
+        probability_columns=PROBABILITY_COLUMNS,
+    )
+    results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
+        scored_df=results_scored,
+        market_share_df=market_share_df,
+        risk_weight=0.8,
+        market_weight=0.2,
+    )
 
-    work = df.copy()
-    work[mun_col] = work[mun_col].astype(str)
-    work = work[work[mun_col].str.contains("cali", case=False, na=False)]
-    work["EPS_display"] = work[eps_col].astype(str).str.strip().str.upper()
-    work["eps_key"] = work["EPS_display"].map(normalize_eps_name)
-    work = work[~work["eps_key"].map(is_excluded_eps)]
-    if eps_keys:
-        work = work[work["eps_key"].isin(eps_keys)]
+ranking_global_exec = ranking_global.copy()
+ranking_global_exec["Riesgo"] = ranking_global_exec["Score_Final"].map(risk_bucket)
+ranking_global_exec["Imputada"] = ranking_global_exec["prob_imputada"].map({True: "Si", False: "No"})
 
-    if contrib_col and subs_col:
-        cols_keep = [eps_col, "EPS_display", "eps_key", contrib_col, subs_col]
-        if esp_col:
-            cols_keep.append(esp_col)
-        subset = work[cols_keep].copy()
-        subset[contrib_col] = pd.to_numeric(subset[contrib_col], errors="coerce")
-        subset[subs_col] = pd.to_numeric(subset[subs_col], errors="coerce")
-        if esp_col:
-            subset[esp_col] = pd.to_numeric(subset[esp_col], errors="coerce")
-        grouped = (
-            subset.groupby(["eps_key", "EPS_display"])[[contrib_col, subs_col] + ([esp_col] if esp_col else [])]
-            .sum(min_count=1)
-            .reset_index()
-        )
-        pivot = grouped.rename(
-            columns={
-                contrib_col: "Contributivo",
-                subs_col: "Subsidiado",
-                esp_col: "Especiales/Excepción" if esp_col else esp_col,
-            }
-        )
-    elif reg_col and aff_col:
-        subset = work[[eps_col, "EPS_display", "eps_key", reg_col, aff_col]].copy()
-
-        def normalize_regimen(value: object) -> str | None:
-            norm = normalize_account(value)
-            if "subsidiado" in norm:
-                return "Subsidiado"
-            if "contributivo" in norm:
-                return "Contributivo"
-            if "especial" in norm or "excepcion" in norm or "excepción" in norm:
-                return "Especiales/Excepción"
-            return None
-
-        subset["Regimen"] = subset[reg_col].map(normalize_regimen)
-        subset = subset.dropna(subset=["Regimen"])
-        subset["afiliados"] = pd.to_numeric(subset[aff_col], errors="coerce")
-        subset = subset.dropna(subset=["afiliados"])
-        grouped = (
-            subset.groupby(["eps_key", "EPS_display", "Regimen"])["afiliados"]
-            .sum()
-            .reset_index()
-        )
-        pivot = (
-            grouped.pivot_table(
-                index=["eps_key", "EPS_display"],
-                columns="Regimen",
-                values="afiliados",
-                aggfunc="sum",
-                fill_value=0,
-            )
-            .reset_index()
-        )
-    else:
-        return None, "No se encontraron columnas necesarias de régimen en EPS_Afiliados."
-
-    for col in ["Subsidiado", "Contributivo", "Especiales/Excepción"]:
-        if col not in pivot.columns:
-            pivot[col] = 0
-    return pivot, None
-
-
-def score_table(selected: str) -> pd.DataFrame:
-    subset = scored_df[scored_df["entity"] == selected]
-    rows = []
-    mapping = [
-        ("Liquidez", "liquidity_score"),
-        ("Endeudamiento", "solvency_score"),
-        ("Rentabilidad", "profitability_score"),
-        ("Eficiencia", "efficiency_score"),
-        ("Score Financiero", "score_financiero"),
-    ]
-    for label, col in mapping:
-        row = {"Score": label}
-        for year in year_cols:
-            value = subset.loc[subset["year"] == int(year), col]
-            row[str(year)] = round(value.iloc[0], 1) if not value.empty and pd.notna(value.iloc[0]) else None
-        rows.append(row)
-    df = pd.DataFrame(rows)
-    df = append_avg_column(df, [str(y) for y in year_cols], label="Promedio")
-    return df
-
-
-ratio_labels = {
-    "current_ratio": "Razón corriente",
-    "cash_ratio": "Razón de caja",
-    "wc_to_rev": "Capital de trabajo neto / REV",
-    "days_cash": "Días de caja (proxy)",
-    "current_assets_ratio": "Activos corrientes / Activos totales",
-    "debt_to_assets": "Deuda total / Activos",
-    "equity_ratio": "Patrimonio / Activos",
-    "assets_to_liabilities": "Activos / Pasivos totales",
-    "current_liab_share": "Peso del corto plazo",
-    "net_debt_to_ebitda": "Deuda neta CP / EBITDA",
-    "gross_margin": "Margen bruto",
-    "ebitda_margin": "Margen EBITDA",
-    "ebit_margin": "Margen operativo (EBIT)",
-    "net_margin": "Margen neto",
-    "roa": "ROA",
-    "asset_turnover": "Rotación de activos",
-    "dso": "DSO (días de cartera)",
-    "dpo": "DPO (días de proveedores)",
-    "opex_cash_ratio": "Índice OPEX en efectivo",
-    "da_intensity": "Intensidad dep/amort",
-}
-
-ratio_kinds = {
-    "current_ratio": "x",
-    "cash_ratio": "x",
-    "wc_to_rev": "percent",
-    "days_cash": "days",
-    "current_assets_ratio": "percent",
-    "debt_to_assets": "percent",
-    "equity_ratio": "percent",
-    "assets_to_liabilities": "x",
-    "current_liab_share": "percent",
-    "net_debt_to_ebitda": "x",
-    "gross_margin": "percent",
-    "ebitda_margin": "percent",
-    "ebit_margin": "percent",
-    "net_margin": "percent",
-    "roa": "percent",
-    "asset_turnover": "x",
-    "dso": "days",
-    "dpo": "days",
-    "opex_cash_ratio": "percent",
-    "da_intensity": "percent",
-}
-
-
-liquidity_ratios = ["current_ratio", "cash_ratio", "wc_to_rev", "days_cash", "current_assets_ratio"]
-solvency_ratios = ["debt_to_assets", "equity_ratio", "assets_to_liabilities", "current_liab_share", "net_debt_to_ebitda"]
-profitability_ratios = ["gross_margin", "ebitda_margin", "ebit_margin", "net_margin", "roa"]
-efficiency_ratios = ["asset_turnover", "dso", "dpo", "opex_cash_ratio", "da_intensity"]
-
-
-tab_analisis, tab_datos, tab_eps = st.tabs(["Análisis", "Datos", "Análisis EPS"])
+tab_analisis, tab_datos, tab_eps = st.tabs(["Analisis", "Datos", "Analisis EPS"])
 
 with tab_analisis:
+    section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle")
+    scen_choice = st.selectbox("Escenario", list(scenarios.keys()), index=0)
 
-    # Prepare FactorEdad + PotencialNormalizado (Cali) for ScoreFinal
-    factor_pot = None
-    score_final_df = None
+    ranking_exec = ranking_escenario[ranking_escenario["Escenario"] == scen_choice].copy()
+    ranking_exec["Riesgo"] = ranking_exec["Score_Final"].map(risk_bucket)
+    ranking_exec["Imputada"] = ranking_exec["prob_imputada"].map({True: "Si", False: "No"})
 
-    if not age_df.empty and not mun_df.empty:
-        age_cols = [str(c) for c in age_df.columns]
-        eps_col = find_col(age_cols, ["eps"])
-        age_col = find_col(age_cols, ["quinquenio", "edad"])
-        total_col = find_col(age_cols, ["total afiliados", "total", "afiliados"])
-
-        mun_cols = [str(c) for c in mun_df.columns]
-        mun_eps_col = find_col(mun_cols, ["eps"])
-        mun_mun_col = find_col(mun_cols, ["municipio"])
-        def find_col_contains(tokens: List[str]) -> str | None:
-            for col in mun_cols:
-                norm = normalize_account(col)
-                if all(tok in norm for tok in tokens):
-                    return col
-            return None
-
-        mun_aff_col = find_col_contains(["total", "afiliados"]) or find_col(mun_cols, ["afiliados", "total"])
-
-        if eps_col and age_col and total_col and mun_eps_col and mun_mun_col and mun_aff_col:
-            age_work = age_df[[eps_col, age_col, total_col]].copy()
-            age_work = age_work.dropna(subset=[eps_col, age_col, total_col])
-            age_work[eps_col] = age_work[eps_col].astype(str).map(normalize_eps_name)
-            age_work["age_group"] = age_work[age_col].map(parse_age_group)
-            age_work["total"] = pd.to_numeric(age_work[total_col], errors="coerce")
-            age_work = age_work.dropna(subset=["age_group", "total"])
-
-            target_groups = [
-                "35-39",
-                "40-44",
-                "45-49",
-                "50-54",
-                "55-59",
-                "60-64",
-                "65-69",
-                "70-74",
-                "75-79",
-                "80+",
-            ]
-            weights_map = {g: float(np.exp(k_age * i)) for i, g in enumerate(target_groups)}
-
-            totals = age_work.groupby(eps_col)["total"].sum()
-            age_sum = age_work.groupby([eps_col, "age_group"])["total"].sum().reset_index()
-            age_sum["p_g"] = age_sum.apply(lambda r: r["total"] / totals.get(r[eps_col], np.nan), axis=1)
-            age_sum["weight"] = age_sum["age_group"].map(weights_map).fillna(0.0)
-            age_sum["weighted"] = age_sum["p_g"] * age_sum["weight"]
-
-            age_index = age_sum.groupby(eps_col)["weighted"].sum().reset_index()
-            age_index.columns = ["EPS", "AgeMixIndex"]
-            age_index["eps_key"] = age_index["EPS"].map(normalize_eps_name)
-            age_index = age_index[~age_index["eps_key"].map(is_excluded_eps)]
-            if valle_eps_keys:
-                age_index = age_index[age_index["eps_key"].isin(valle_eps_keys)]
-            median_index = age_index["AgeMixIndex"].median()
-            if median_index == 0 or pd.isna(median_index):
-                age_index["FactorEdad"] = 1.0
-            else:
-                age_index["FactorEdad"] = age_index["AgeMixIndex"] / median_index
-
-            mun_work = mun_df[[mun_eps_col, mun_mun_col, mun_aff_col]].copy()
-            mun_work[mun_mun_col] = mun_work[mun_mun_col].astype(str)
-            mun_work = mun_work[mun_work[mun_mun_col].str.contains("cali", case=False, na=False)]
-            mun_work[mun_eps_col] = mun_work[mun_eps_col].astype(str).map(normalize_eps_name)
-            mun_work["afiliados"] = pd.to_numeric(mun_work[mun_aff_col], errors="coerce")
-            mun_work = mun_work.dropna(subset=["afiliados"])
-
-            eps_aff = mun_work.groupby(mun_eps_col)["afiliados"].sum().reset_index()
-            total_aff = eps_aff["afiliados"].sum()
-            eps_aff["market_share"] = eps_aff["afiliados"] / total_aff if total_aff else np.nan
-
-            min_val = eps_aff["market_share"].min()
-            max_val = eps_aff["market_share"].max()
-            if pd.isna(min_val) or pd.isna(max_val) or max_val == min_val:
-                eps_aff["PotencialNormalizado"] = 1.0
-            else:
-                eps_aff["PotencialNormalizado"] = 0.5 + (
-                    (eps_aff["market_share"] - min_val) / (max_val - min_val)
-                )
-
-            eps_aff = eps_aff.rename(columns={mun_eps_col: "EPS"})
-            eps_aff["eps_key"] = eps_aff["EPS"].map(normalize_eps_name)
-            eps_aff = eps_aff[~eps_aff["eps_key"].map(is_excluded_eps)]
-            if valle_eps_keys:
-                eps_aff = eps_aff[eps_aff["eps_key"].isin(valle_eps_keys)]
-
-            factor_pot = age_index.merge(
-                eps_aff[["EPS", "eps_key", "PotencialNormalizado", "market_share"]],
-                on="eps_key",
-                how="inner",
-                suffixes=("_age", ""),
-            )
-            factor_pot["EPS"] = factor_pot["EPS"].astype(str).str.upper()
-
-            score_final_df = scored_df.copy()
-            score_final_df["eps_key"] = score_final_df["entity"].map(normalize_eps_name)
-            score_final_df = score_final_df.merge(
-                factor_pot[["eps_key", "EPS", "FactorEdad", "PotencialNormalizado", "market_share"]],
-                on="eps_key",
-                how="inner",
-            )
-            score_final_df["ScoreFinal"] = (
-                (score_final_df["score_financiero"] / 100)
-                * score_final_df["PotencialNormalizado"]
-                * score_final_df["FactorEdad"]
-            )
-
-    last_year = max(int(y) for y in year_cols)
-
-    section_header("Filtros de Análisis", "Define qué EPS comparar en las gráficas")
-    explain_box(
-        "Como se calcula",
-        [
-            "Permite seleccionar el universo de EPS para comparaciones.",
-            "Opciones: todas, intervenidas, no intervenidas, top por score.",
-            "El filtro se aplica a las gráficas y tablas agregadas.",
-        ],
+    top_eps = ranking_exec.sort_values("Ranking_Escenario_Final").head(1)
+    top_name = top_eps["EPS"].iloc[0] if not top_eps.empty else "NA"
+    top_score = float(top_eps["Score_Final"].iloc[0]) if not top_eps.empty else np.nan
+    mean_score = float(ranking_exec["Score_Final"].mean()) if not ranking_exec.empty else np.nan
+    top3_share = (
+        float(ranking_exec.sort_values("MarketShare_Valle", ascending=False).head(3)["MarketShare_Valle"].sum())
+        if not ranking_exec.empty
+        else np.nan
     )
-    filter_options = ["Todas", "Solo intervenidas", "Solo no intervenidas"]
-    if score_final_df is not None and not score_final_df.empty:
-        filter_options.extend(["Top 5 (Score Final)", "Top 10 (Score Final)"])
-    filter_choice = st.selectbox("EPS en análisis", filter_options, index=0)
+    imputadas_n = int(ranking_exec["prob_imputada"].sum()) if not ranking_exec.empty else 0
 
-    if score_final_df is not None and not score_final_df.empty:
-        analysis_base = score_final_df.copy()
-        if "eps_key" not in analysis_base.columns:
-            analysis_base["eps_key"] = analysis_base["EPS"].map(normalize_eps_name)
-        eps_lookup = analysis_base[["EPS", "eps_key"]].drop_duplicates()
-    else:
-        analysis_base = scored_df.copy()
-        analysis_base["eps_key"] = analysis_base["entity"].map(normalize_eps_name)
-        eps_lookup = analysis_base[["entity", "eps_key"]].rename(columns={"entity": "EPS"}).drop_duplicates()
-
-    if filter_choice.startswith("Top") and score_final_df is not None and not score_final_df.empty:
-        top_n = 5 if "Top 5" in filter_choice else 10
-        top_df = score_final_df[score_final_df["year"] == last_year].dropna(subset=["ScoreFinal"])
-        analysis_keys = (
-            top_df.sort_values("ScoreFinal", ascending=False).head(top_n)["eps_key"].dropna().unique().tolist()
-        )
-    elif filter_choice == "Solo intervenidas":
-        analysis_keys = eps_lookup[eps_lookup["EPS"].map(is_intervened_eps)]["eps_key"].tolist()
-    elif filter_choice == "Solo no intervenidas":
-        analysis_keys = eps_lookup[~eps_lookup["EPS"].map(is_intervened_eps)]["eps_key"].tolist()
-    else:
-        analysis_keys = eps_lookup["eps_key"].tolist()
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("EPS evaluadas", f"{len(ranking_exec):,}")
+    m2.metric("Lider escenario", str(top_name).upper())
+    m3.metric("Score lider", f"{top_score:.1f}" if pd.notna(top_score) else "NA")
+    m4.metric("Score promedio", f"{mean_score:.1f}" if pd.notna(mean_score) else "NA")
+    m5.metric("Mercado Top 3", f"{top3_share:.1%}" if pd.notna(top3_share) else "NA")
+    st.caption(f"EPS con imputacion por datos historicos insuficientes: {imputadas_n}")
 
     divider()
+    section_header("Tablero de decision", "Top y alertas por escenario seleccionado")
+    c_top, c_alert = st.columns(2)
 
-    section_header("Evolución de Scores", "EPS según filtro seleccionado")
-    explain_box(
-        "Como se calcula",
-        [
-            "Score Financiero construido con subscores por liquidez, solvencia, rentabilidad y eficiencia.",
-            "Los subscores se obtienen de ratios winsorizados (2%-98%) y percentil por año.",
-            "El score final aplica pesos configurables en la barra lateral.",
-        ],
-    )
-    st.caption(
-        "Colores: tonos cálidos (rojo/naranja) = EPS intervenidas; tonos fríos (azul/verde) = demás EPS."
-    )
-    col_scores_left, col_scores_right = st.columns(2)
-
-    # Line chart: Top 5 EPS by last year score (Score Financiero)
-    scored_plot = scored_df.copy()
-    scored_plot["eps_key"] = scored_plot["entity"].map(normalize_eps_name)
-    scored_plot = scored_plot[scored_plot["eps_key"].isin(analysis_keys)]
-    scored_plot["entity_display"] = scored_plot["entity"].map(lambda x: str(x).upper())
-    line_df = scored_plot
-    color_map_fin = build_color_map(line_df["entity_display"].dropna().unique().tolist())
-
-    with col_scores_left:
-        if not line_df.empty:
-            fig = px.line(
-                line_df,
-                x="year",
-                y="score_financiero",
-                color="entity_display",
-                markers=True,
-                title="Score Financiero",
-                labels={"year": "Año", "score_financiero": "Score Financiero"},
-                color_discrete_map=color_map_fin,
-            )
-            fig.update_yaxes(range=[0, 100])
-            fig = apply_line_chart_style(fig)
-            chart_container(fig)
-        else:
-            st.info("No hay EPS para mostrar con el filtro actual.")
-
-    # Line chart: Top 5 EPS by last year score (Score Final)
-    if score_final_df is not None and not score_final_df.empty:
-        score_final_plot = score_final_df.copy()
-        if "eps_key" not in score_final_plot.columns:
-            score_final_plot["eps_key"] = score_final_plot["EPS"].map(normalize_eps_name)
-        score_final_plot = score_final_plot[score_final_plot["eps_key"].isin(analysis_keys)]
-        score_final_plot["EPS_display"] = score_final_plot["EPS"].map(lambda x: str(x).upper())
-        line_final = score_final_plot
-        with col_scores_right:
-            if not line_final.empty:
-                color_map_final = build_color_map(line_final["EPS_display"].dropna().unique().tolist())
-                fig = px.line(
-                    line_final,
-                    x="year",
-                    y="ScoreFinal",
-                    color="EPS_display",
-                    markers=True,
-                    title="Score Final",
-                    labels={"year": "Año", "ScoreFinal": "Score Final"},
-                    color_discrete_map=color_map_final,
-                )
-                fig = apply_line_chart_style(fig)
-                chart_container(fig)
-            else:
-                st.info("No hay EPS con Score Final para el filtro actual.")
-
-    divider()
-
-    section_header("Ranking por Año", "Ranking (1 = mejor)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ordena las EPS por Score Financiero dentro de cada año.",
-            "Ranking 1 corresponde a la mejor posición relativa.",
-        ],
-    )
-    st.caption(
-        "Colores: tonos cálidos (rojo/naranja) = EPS intervenidas; tonos fríos (azul/verde) = demás EPS."
-    )
-    col_rank_left, col_rank_right = st.columns(2)
-
-    rank_fin = scored_plot.copy()
-    rank_fin["rank"] = rank_fin.groupby("year")["score_financiero"].rank(ascending=False, method="dense")
-    with col_rank_left:
-        if not rank_fin.empty:
-            fig = px.line(
-                rank_fin,
-                x="year",
-                y="rank",
-                color="entity_display",
-                markers=True,
-                title="Ranking Score Financiero",
-                labels={"year": "Año", "rank": "Ranking (1 = mejor)"},
-                color_discrete_map=color_map_fin,
-            )
-            fig.update_yaxes(autorange="reversed", dtick=1)
-            fig = apply_line_chart_style(fig)
-            chart_container(fig)
-        else:
-            st.info("No hay EPS para mostrar con el filtro actual.")
-
-    if score_final_df is not None and not score_final_df.empty:
-        rank_final = score_final_plot.copy()
-        rank_final["rank"] = rank_final.groupby("year")["ScoreFinal"].rank(ascending=False, method="dense")
-        with col_rank_right:
-            if not rank_final.empty:
-                color_map_final = build_color_map(rank_final["EPS_display"].dropna().unique().tolist())
-                fig = px.line(
-                    rank_final,
-                    x="year",
-                    y="rank",
-                    color="EPS_display",
-                    markers=True,
-                    title="Ranking Score Final",
-                    labels={"year": "Año", "rank": "Ranking (1 = mejor)"},
-                    color_discrete_map=color_map_final,
-                )
-                fig.update_yaxes(autorange="reversed", dtick=1)
-                fig = apply_line_chart_style(fig)
-                chart_container(fig)
-            else:
-                st.info("No hay EPS con Score Final para el filtro actual.")
-
-    divider()
-    section_header("Score Financiero vs. % de Mercado", "Último año disponible")
-    explain_box(
-        "Como se calcula",
-        [
-            "Cruce entre Score Financiero (último año) y % de mercado en Cali.",
-            "El tamaño del punto refleja el score.",
-            "Incluye línea de regresión para ver relación general.",
-        ],
-    )
-    if score_final_df is None or score_final_df.empty:
-        st.info("No hay datos de mercado para el gráfico de dispersión.")
-    else:
-        scatter_df = score_final_df.copy()
-        scatter_df["eps_key"] = scatter_df["EPS"].map(normalize_eps_name)
-        scatter_df = scatter_df[scatter_df["eps_key"].isin(analysis_keys)]
-        scatter_df = scatter_df[scatter_df["year"] == last_year].dropna(subset=["score_financiero", "market_share"])
-        scatter_df["EPS_display"] = scatter_df["EPS"].map(lambda x: str(x).upper())
-        if scatter_df.empty:
-            st.info("No hay EPS para mostrar con el filtro actual.")
-        else:
-            color_map_scatter = build_color_map(scatter_df["EPS_display"].dropna().unique().tolist())
-            fig = px.scatter(
-                scatter_df,
-                x="market_share",
-                y="score_financiero",
-                color="EPS_display",
-                size="score_financiero",
-                hover_name="EPS_display",
-                title="Score Financiero vs % de Mercado (Cali)",
-                labels={"market_share": "% de mercado (Cali)", "score_financiero": "Score Financiero"},
-                color_discrete_map=color_map_scatter,
-            )
-            if len(scatter_df) >= 2 and scatter_df["market_share"].nunique() > 1:
-                x_vals = scatter_df["market_share"].astype(float).to_numpy()
-                y_vals = scatter_df["score_financiero"].astype(float).to_numpy()
-                slope, intercept = np.polyfit(x_vals, y_vals, 1)
-                x_line = np.linspace(x_vals.min(), x_vals.max(), 100)
-                y_line = slope * x_line + intercept
-                fig.add_trace(
-                    go.Scatter(
-                        x=x_line,
-                        y=y_line,
-                        mode="lines",
-                        name="Regresión lineal",
-                        line=dict(color="#0a1414", width=2, dash="dash"),
-                    )
-                )
-            fig.update_traces(marker=dict(opacity=0.85, line=dict(width=0.5, color="#0a1414")))
-            fig.update_xaxes(tickformat=".1%")
-            fig.update_yaxes(range=[0, 100])
-            fig = apply_line_chart_style(fig)
-            chart_container(fig)
-
-    section_header("FactorEdad y Potencial Normalizado (Cali)")
-    explain_box(
-        "Como se calcula",
-        [
-            "FactorEdad pondera afiliados de mayor edad con pesos exponenciales (k).",
-            "PotencialNormalizado es la participación de afiliados en Cali, escalada 0.5–1.5.",
-            "ScoreFinal = (ScoreFinanciero/100) × PotencialNormalizado × FactorEdad.",
-        ],
-    )
-    st.caption(
-        "El Score Final combina tres factores: desempeño financiero (Score Financiero), "
-        "potencial de mercado en Cali (Potencial Normalizado) y perfil etario "
-        "de los afiliados (FactorEdad)."
-    )
-    if age_df.empty:
-        st.warning("No se pudo leer EPS_Edad.")
-        st.caption(f"Detalle: {age_source}")
-    elif mun_df.empty:
-        st.warning("No se pudo leer EPS_Afiliados.")
-        st.caption(f"Detalle: {mun_source}")
-    else:
-        if factor_pot is None:
-            st.warning("No se pudieron calcular FactorEdad y PotencialNormalizado.")
-        else:
-            merged = factor_pot.copy()
-            score_latest = scored_df[scored_df["year"] == last_year][
-                ["entity", "score_financiero"]
-            ].rename(columns={"entity": "EPS", "score_financiero": "ScoreFinanciero"})
-            score_latest["eps_key"] = score_latest["EPS"].map(normalize_eps_name)
-            merged = merged.merge(score_latest[["eps_key", "ScoreFinanciero"]], on="eps_key", how="left")
-            merged["ScoreFinal"] = (
-                (merged["ScoreFinanciero"] / 100)
-                * merged["PotencialNormalizado"]
-                * merged["FactorEdad"]
-            )
-            merged = merged.sort_values("ScoreFinal", ascending=False)
-
-            display_df = merged[
+    with c_top:
+        st.caption("Top 5 recomendado")
+        top5 = ranking_exec.sort_values("Ranking_Escenario_Final").head(5).copy()
+        st.dataframe(
+            top5[
                 [
+                    "Ranking_Escenario_Final",
                     "EPS",
-                    "FactorEdad",
-                    "PotencialNormalizado",
-                    "ScoreFinanciero",
-                    "ScoreFinal",
-                    "market_share",
+                    "Riesgo",
+                    "Score_Final",
+                    "Score_Riesgo",
+                    "Score_Mercado",
+                    "MarketShare_Valle",
+                    "Imputada",
                 ]
-            ].rename(columns={"market_share": "MarketShareCali"})
+            ].style.format(
+                {
+                    "Score_Final": "{:.1f}",
+                    "Score_Riesgo": "{:.1f}",
+                    "Score_Mercado": "{:.1f}",
+                    "MarketShare_Valle": "{:.2%}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
-            avg_row = {
-                "EPS": "PROMEDIO",
-                "FactorEdad": display_df["FactorEdad"].mean(skipna=True),
-                "PotencialNormalizado": display_df["PotencialNormalizado"].mean(skipna=True),
-                "ScoreFinanciero": display_df["ScoreFinanciero"].mean(skipna=True),
-                "ScoreFinal": display_df["ScoreFinal"].mean(skipna=True),
-                "MarketShareCali": display_df["MarketShareCali"].mean(skipna=True),
-            }
-            display_df = pd.concat([display_df, pd.DataFrame([avg_row])], ignore_index=True)
-
-            try:
-                import matplotlib  # noqa: F401
-
-                styled = (
-                    display_df.round(4).style
-                    .background_gradient(
-                        subset=[
-                            "FactorEdad",
-                            "PotencialNormalizado",
-                            "ScoreFinanciero",
-                            "ScoreFinal",
-                            "MarketShareCali",
-                        ],
-                        cmap="Blues",
-                    )
-                )
-                st.dataframe(styled, use_container_width=True)
-            except Exception:
-                st.dataframe(display_df.round(4), use_container_width=True)
-
-            # Ranking EPS x Año usando ScoreFinal (solo EPS con Cali)
-            section_header("Ranking EPS x Año (Score Final)")
-            explain_box(
-                "Como se calcula",
+    with c_alert:
+        st.caption("Alertas (ultimas 5)")
+        last5 = ranking_exec.sort_values("Ranking_Escenario_Final", ascending=False).head(5).copy()
+        st.dataframe(
+            last5[
                 [
-                    "Ranking anual del Score Final (incluye mercado y edad).",
-                    "Se ordena por el último año disponible.",
-                ],
-            )
-            if score_final_df is None or score_final_df.empty:
-                st.info("No hay datos para el ranking de Score Final.")
-            else:
-                pivot = score_final_df.pivot_table(index="EPS", columns="year", values="ScoreFinal", aggfunc="mean")
-                if last_year in pivot.columns:
-                    pivot = pivot.sort_values(by=last_year, ascending=False)
-                avg_row = pivot.mean(skipna=True).to_frame().T
-                avg_row.index = ["PROMEDIO"]
-                pivot = pd.concat([pivot, avg_row])
-                st.dataframe(pivot.round(4).reset_index(), use_container_width=True)
+                    "Ranking_Escenario_Final",
+                    "EPS",
+                    "Riesgo",
+                    "Score_Final",
+                    "Score_Riesgo",
+                    "MarketShare_Valle",
+                    "Imputada",
+                ]
+            ].style.format(
+                {
+                    "Score_Final": "{:.1f}",
+                    "Score_Riesgo": "{:.1f}",
+                    "MarketShare_Valle": "{:.2%}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    divider()
+    section_header("Ranking por escenario", "Score final = 80% riesgo + 20% mercado")
+    st.dataframe(
+        ranking_exec[
+            [
+                "Escenario",
+                "Ranking_Escenario_Final",
+                "EPS",
+                "Riesgo",
+                "Score_Final",
+                "Score_Riesgo",
+                "Score_Mercado",
+                "MarketShare_Valle",
+                "Imputada",
+            ]
+        ].style.format(
+            {
+                "Score_Final": "{:.1f}",
+                "Score_Riesgo": "{:.1f}",
+                "Score_Mercado": "{:.1f}",
+                "MarketShare_Valle": "{:.2%}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    scen_plot = ranking_exec.sort_values("Ranking_Escenario_Final").head(10)
+    if not scen_plot.empty:
+        fig = px.bar(
+            scen_plot.sort_values("Score_Final", ascending=True),
+            x="Score_Final",
+            y="EPS",
+            orientation="h",
+            color="Riesgo",
+            title=f"Top 10 EPS por Score Final - {scen_choice}",
+            labels={"Score_Final": "Score Final", "EPS": "EPS"},
+            color_discrete_map={
+                "Bajo riesgo": "#0f6a62",
+                "Riesgo medio": "#e9a03b",
+                "Alto riesgo": "#c25416",
+                "Sin dato": "#7d8b8b",
+            },
+        )
+        fig = style_chart(fig)
+        chart_container(fig)
+
+    divider()
+    section_header("Ranking global", "Promedio de escenarios")
+    st.dataframe(
+        ranking_global_exec[
+            [
+                "Ranking_Global_Final",
+                "EPS",
+                "Riesgo",
+                "Score_Final",
+                "Score_Riesgo",
+                "Score_Mercado",
+                "MarketShare_Valle",
+                "Afiliados_Valle",
+                "Imputada",
+            ]
+        ].style.format(
+            {
+                "Score_Final": "{:.1f}",
+                "Score_Riesgo": "{:.1f}",
+                "Score_Mercado": "{:.1f}",
+                "MarketShare_Valle": "{:.2%}",
+                "Afiliados_Valle": "{:,.0f}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    with st.expander("Ver detalle tecnico de probabilidades"):
+        section_header("Probabilidades base", "PROMEDIO por escenario")
+        explain_box(
+            "Como se calcula",
+            [
+                "P_avg_* = proporcion promedio de anos de incumplimiento en la simulacion.",
+                "Se imputan probabilidades faltantes por promedio del escenario.",
+                "prob_imputada identifica EPS con faltantes historicos en EEFF.",
+            ],
+        )
+        prob_cols = ["Escenario", "EPS"] + PROBABILITY_COLUMNS + ["prob_imputada", "motivo_imputacion"]
+        prob_view = results_ranked[prob_cols].copy().sort_values(["Escenario", "EPS"])
+        prob_view["prob_imputada"] = prob_view["prob_imputada"].map({True: "Si", False: "No"})
+        st.dataframe(
+            prob_view.style.format({col: "{:.2%}" for col in PROBABILITY_COLUMNS}),
+            width="stretch",
+            hide_index=True,
+        )
 
 with tab_datos:
-    section_header("Afiliados mayores de 55 años", "EPS_Edad (Femenino, Masculino y Total)")
+    section_header("% de mercado sobre todo Valle", "Denominador total de afiliados del departamento")
     explain_box(
         "Como se calcula",
         [
-            "Se filtran afiliados del Valle del Cauca en grupos de edad >= 55.",
-            "Se suman por EPS y por sexo (femenino, masculino, total).",
-            "Se agrega una fila TOTAL para el agregado del mercado.",
+            "Se usa EPS_Afiliados filtrando Departamento = Valle del Cauca.",
+            "Numerador: afiliados de cada EPS objetivo.",
+            "Denominador: afiliados totales de todas las EPS en Valle.",
         ],
     )
-    if age_df.empty:
-        st.warning("No se pudo leer EPS_Edad.")
-        st.caption(f"Detalle: {age_source}")
-    else:
-        affiliates_55 = affiliates_55_table(age_df)
-        if affiliates_55 is None or affiliates_55.empty:
-            st.warning("No se pudieron calcular afiliados mayores de 55 años.")
-        else:
-            styled_aff = affiliates_55.style.format(
-                {"Femenino": "{:,.0f}", "Masculino": "{:,.0f}", "Total afiliados": "{:,.0f}"}
-            )
-            st.dataframe(styled_aff, use_container_width=True)
+
+    share_view = market_share_df.copy().sort_values("MarketShare_Valle", ascending=False)
+    share_view = share_view.rename(columns={"MarketShare_Valle": "% Mercado Valle"})
+    st.dataframe(
+        share_view.style.format({"Afiliados_Valle": "{:,.0f}", "% Mercado Valle": "{:.2%}"}),
+        width="stretch",
+        hide_index=True,
+    )
 
     divider()
-    section_header("Composición por Régimen", "EPS por subsidiado vs contributivo (Cali)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Fuente: EPS_Afiliados en Cali (o Valle como proxy).",
-            "Se suman afiliados por régimen (subsidiado, contributivo, especiales).",
-        ],
-    )
-    pivot, msg = get_regimen_pivot(mun_df, list(valle_eps_keys) if valle_eps_keys else None)
-    if pivot is None:
-        st.info(msg or "No hay datos de régimen para mostrar.")
+    section_header("Afiliados mayores de 55 anos", "Valle del Cauca")
+    age55_df = affiliates_55_table(eps_edad_df)
+    if age55_df is None or age55_df.empty:
+        st.info("No fue posible construir la tabla de afiliados mayores de 55 anos.")
     else:
-        pivot["Total"] = pivot.get("Subsidiado", 0) + pivot.get("Contributivo", 0)
-        pivot = pivot.sort_values("Total", ascending=False)
-        y_labels = pivot["EPS_display"]
-
-        fig = go.Figure()
-        fig.add_trace(
-            go.Bar(
-                y=y_labels,
-                x=pivot.get("Subsidiado", 0),
-                name="Subsidiado",
-                orientation="h",
-                marker_color="#e8590c",
-            )
+        st.dataframe(
+            age55_df.style.format(
+                {
+                    "Femenino": "{:,.0f}",
+                    "Masculino": "{:,.0f}",
+                    "Total afiliados": "{:,.0f}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
         )
-        fig.add_trace(
-            go.Bar(
-                y=y_labels,
-                x=pivot.get("Contributivo", 0),
-                name="Contributivo",
-                orientation="h",
-                marker_color="#1c7ed6",
-            )
-        )
-        fig.update_layout(
-            barmode="stack",
-            title="Afiliados por Régimen (Cali)",
-            title_x=0.5,
-            title_xanchor="center",
-            xaxis_title="Afiliados",
-            yaxis_title="EPS",
-            margin=dict(l=18, r=18, t=36, b=24),
-        )
-        fig = style_chart(fig)
-        chart_container(fig)
 
     divider()
-    section_header("Pirámide Poblacional", "Valle del Cauca (agregado)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Agrupa afiliados por quinquenio de edad y sexo.",
-            "Se grafican hombres (izquierda) y mujeres (derecha).",
-        ],
-    )
-    if age_df.empty:
-        st.warning("No se pudo leer EPS_Edad.")
-        st.caption(f"Detalle: {age_source}")
+    section_header("Composicion por regimen", "Valle del Cauca")
+    reg_df = regimen_valle_table(eps_afiliados_df)
+    if reg_df is None or reg_df.empty:
+        st.info("No fue posible construir la composicion por regimen.")
     else:
-        def render_pyramid(pyramid: pd.DataFrame | None, title: str) -> None:
-            if pyramid is None or pyramid.empty:
-                st.info(f"No hay datos para {title}.")
-                return
-            y_labels = pyramid["age_group"].tolist()
-            male_vals = pyramid["Masculino"].tolist()
-            female_vals = pyramid["Femenino"].tolist()
-            fig = go.Figure()
-            fig.add_trace(
-                go.Bar(
-                    y=y_labels,
-                    x=[-v for v in male_vals],
-                    name="Masculino",
-                    orientation="h",
-                    marker_color="#1c7ed6",
-                    text=male_vals,
-                    texttemplate="%{text:,.0f}",
-                    textposition="inside",
-                    insidetextanchor="middle",
-                    hovertemplate="%{y}<br>Masculino: %{customdata:,}<extra></extra>",
-                    customdata=male_vals,
-                )
-            )
-            fig.add_trace(
-                go.Bar(
-                    y=y_labels,
-                    x=female_vals,
-                    name="Femenino",
-                    orientation="h",
-                    marker_color="#e8590c",
-                    text=female_vals,
-                    texttemplate="%{text:,.0f}",
-                    textposition="inside",
-                    insidetextanchor="middle",
-                    hovertemplate="%{y}<br>Femenino: %{x:,}<extra></extra>",
-                )
-            )
-            max_val = max(max(male_vals, default=0), max(female_vals, default=0))
-            fig.update_layout(
-                barmode="relative",
-                title=f"Piramide Poblacional {title}",
-                title_x=0.5,
-                title_xanchor="center",
-                xaxis=dict(
-                    title="Afiliados",
-                    tickformat="~s",
-                    tickvals=[-max_val, -max_val / 2, 0, max_val / 2, max_val],
-                    ticktext=[
-                        f"{max_val:,.0f}",
-                        f"{(max_val/2):,.0f}",
-                        "0",
-                        f"{(max_val/2):,.0f}",
-                        f"{max_val:,.0f}",
-                    ],
-                ),
-                yaxis=dict(title="Grupo de edad", categoryorder="array", categoryarray=y_labels),
-                margin=dict(l=18, r=18, t=36, b=24),
-            )
-            fig = style_chart(fig)
-            chart_container(fig)
-
-        col_valle, col_sant = st.columns(2)
-        with col_valle:
-            render_pyramid(population_pyramid(age_df, "valle del cauca"), "Valle del Cauca")
-        with col_sant:
-            render_pyramid(population_pyramid(age_df, "santander"), "Santander")
+        st.dataframe(
+            reg_df.style.format(
+                {
+                    "Contributivo": "{:,.0f}",
+                    "Subsidiado": "{:,.0f}",
+                    "Especiales/Excepcion": "{:,.0f}",
+                    "Total afiliados": "{:,.0f}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
 with tab_eps:
-    section_header("Análisis EPS", "Indicadores y subscores de una EPS")
-    explain_box(
-        "Como se calcula",
-        [
-            "Vista detallada por una EPS seleccionada.",
-            "Se muestran subscores, ratios y estructura financiera anual.",
-        ],
+    section_header("Analisis EPS", "Vista unica: estado de resultados + probabilidades")
+    selected_eps = st.selectbox(
+        "EPS",
+        EPS_OBJ_DEFAULT,
+        index=0,
+        format_func=lambda x: str(x).upper(),
     )
-    selected_eps = st.selectbox("EPS", eps_list, index=0, format_func=lambda x: str(x).upper())
 
-    section_header("Subscores y Score Financiero", "EPS seleccionada")
-    explain_box(
-        "Como se calcula",
-        [
-            "Subscores por categoría = promedio de ratios disponibles.",
-            "Score Financiero = promedio ponderado de subscores.",
-            "Pesos configurables en la barra lateral.",
-        ],
-    )
-    score_df = score_table(selected_eps)
-    score_fmt = {str(year): "{:.1f}" for year in year_cols}
-    score_fmt["Promedio"] = "{:.1f}"
-    st.dataframe(score_df.style.format(score_fmt), use_container_width=True)
+    eps_global = ranking_global_exec[ranking_global_exec["EPS"] == selected_eps].copy()
+    rank_global = int(eps_global["Ranking_Global_Final"].iloc[0]) if not eps_global.empty else np.nan
+    score_global = float(eps_global["Score_Final"].iloc[0]) if not eps_global.empty else np.nan
+    riesgo_global = str(eps_global["Riesgo"].iloc[0]) if not eps_global.empty else "Sin dato"
+    share_valle = float(eps_global["MarketShare_Valle"].iloc[0]) if not eps_global.empty else np.nan
 
-    divider()
-    section_header("Piramide Poblacional", "EPS seleccionada (Valle del Cauca)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Filtra EPS_Edad por la EPS seleccionada.",
-            "Agrupa por quinquenio y sexo para la pirámide.",
-        ],
-    )
-    pyramid_eps = population_pyramid_by_eps(age_df, normalize_eps_name(selected_eps))
-    if pyramid_eps is None or pyramid_eps.empty:
-        st.info("No hay datos para la piramide poblacional de esta EPS.")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Ranking global", f"#{rank_global}" if pd.notna(rank_global) else "NA")
+    k2.metric("Score global", f"{score_global:.1f}" if pd.notna(score_global) else "NA")
+    k3.metric("Riesgo", riesgo_global)
+    k4.metric("% mercado Valle", f"{share_valle:.2%}" if pd.notna(share_valle) else "NA")
+
+    section_header("Estado de resultados (anual)")
+    income_df = build_income_statement_view(diagnostics["base_eps"], selected_eps)
+    if income_df.empty:
+        st.info("No hay estado de resultados para la EPS seleccionada.")
     else:
-        y_labels = pyramid_eps["age_group"].tolist()
-        male_vals = pyramid_eps["Masculino"].tolist()
-        female_vals = pyramid_eps["Femenino"].tolist()
-        fig = go.Figure()
-        fig.add_trace(
-            go.Bar(
-                y=y_labels,
-                x=[-v for v in male_vals],
-                name="Masculino",
-                orientation="h",
-                marker_color="#1c7ed6",
-                text=male_vals,
-                texttemplate="%{text:,.0f}",
-                textposition="inside",
-                insidetextanchor="middle",
-                hovertemplate="%{y}<br>Masculino: %{customdata:,}<extra></extra>",
-                customdata=male_vals,
-            )
-        )
-        fig.add_trace(
-            go.Bar(
-                y=y_labels,
-                x=female_vals,
-                name="Femenino",
-                orientation="h",
-                marker_color="#e8590c",
-                text=female_vals,
-                texttemplate="%{text:,.0f}",
-                textposition="inside",
-                insidetextanchor="middle",
-                hovertemplate="%{y}<br>Femenino: %{x:,}<extra></extra>",
-            )
-        )
-        max_val = max(max(male_vals, default=0), max(female_vals, default=0))
-        fig.update_layout(
-            barmode="relative",
-            title="Piramide Poblacional EPS",
-            title_x=0.5,
-            title_xanchor="center",
-            xaxis=dict(
-                title="Afiliados",
-                tickformat="~s",
-                tickvals=[-max_val, -max_val / 2, 0, max_val / 2, max_val],
-                ticktext=[
-                    f"{max_val:,.0f}",
-                    f"{(max_val/2):,.0f}",
-                    "0",
-                    f"{(max_val/2):,.0f}",
-                    f"{max_val:,.0f}",
-                ],
+        st.dataframe(
+            income_df.style.format(
+                {
+                    "Ingresos": "{:,.0f}",
+                    "OPEX_caja": "{:,.0f}",
+                    "EBITDA": "{:,.0f}",
+                    "EBIT": "{:,.0f}",
+                    "Utilidad_Neta": "{:,.0f}",
+                    "Margen_EBITDA": "{:.2%}",
+                    "Margen_EBIT": "{:.2%}",
+                    "Margen_Neto": "{:.2%}",
+                }
             ),
-            yaxis=dict(title="Grupo de edad", categoryorder="array", categoryarray=y_labels),
-            margin=dict(l=18, r=18, t=36, b=24),
+            width="stretch",
+            hide_index=True,
         )
-        fig = style_chart(fig)
-        chart_container(fig)
-
-    # Radar chart: subscores last year
-    radar_row = scored_df[(scored_df["entity"] == selected_eps) & (scored_df["year"] == last_year)]
-    if not radar_row.empty:
-        values = [
-            radar_row["liquidity_score"].iloc[0],
-            radar_row["solvency_score"].iloc[0],
-            radar_row["profitability_score"].iloc[0],
-            radar_row["efficiency_score"].iloc[0],
-        ]
-        if any(pd.isna(v) for v in values):
-            st.info("Radar no disponible: faltan subscores para el último año.")
-        else:
-            categories = ["Liquidez", "Endeudamiento", "Rentabilidad", "Eficiencia"]
-            radar_color = WARM_COLORS[0] if is_intervened_eps(selected_eps) else COOL_COLORS[0]
-            fig = go.Figure()
-            fig.add_trace(
-                go.Scatterpolar(
-                    r=values + [values[0]],
-                    theta=categories + [categories[0]],
-                    fill="toself",
-                    name=str(selected_eps).upper(),
-                    line=dict(color=radar_color, width=2),
-                )
-            )
-            fig.update_layout(
-                title="Radar de Subscores (último año)",
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                title_x=0.5,
-                title_xanchor="center",
-                title_font=dict(size=16, family="Newsreader", color="#0a1414"),
-                margin=dict(l=18, r=18, t=36, b=24),
-            )
-            chart_container(fig)
 
     divider()
-    section_header("Régimen EPS", "Distribución Cali")
-    explain_box(
-        "Como se calcula",
-        [
-            "Distribuye afiliados de la EPS por régimen en Cali.",
-            "Se calcula a partir de EPS_Afiliados.",
-        ],
+    section_header("Probabilidades y scoring de la EPS", "Resultados por escenario")
+    eps_prob_cols = [
+        "Escenario",
+        "Ranking_Escenario_Final",
+        "EPS",
+        "Score_Final",
+        "Score_Riesgo",
+        "Score_Mercado",
+        "MarketShare_Valle",
+    ] + PROBABILITY_COLUMNS + ["prob_imputada", "motivo_imputacion"]
+    eps_probs = (
+        ranking_escenario[ranking_escenario["EPS"] == selected_eps][eps_prob_cols]
+        .sort_values("Escenario")
+        .reset_index(drop=True)
     )
-    eps_key_selected = normalize_eps_name(selected_eps)
-    pivot_eps, msg = get_regimen_pivot(mun_df, [eps_key_selected])
-    if pivot_eps is None:
-        st.info(msg or "No hay datos de régimen para mostrar.")
+
+    if eps_probs.empty:
+        st.info("No hay probabilidades calculadas para la EPS seleccionada.")
     else:
-        row = pivot_eps[pivot_eps["eps_key"] == eps_key_selected]
-        if row.empty:
-            st.info("No hay datos de régimen para la EPS seleccionada.")
-        else:
-            subs = float(row["Subsidiado"].iloc[0]) if "Subsidiado" in row else 0.0
-            contrib = float(row["Contributivo"].iloc[0]) if "Contributivo" in row else 0.0
-            especiales = (
-                float(row["Especiales/Excepción"].iloc[0])
-                if "Especiales/Excepción" in row
-                else 0.0
-            )
-            labels = ["Subsidiado", "Contributivo"]
-            values = [subs, contrib]
-            colors = ["#e8590c", "#1c7ed6"]
-            if especiales > 0:
-                labels.append("Especiales/Excepción")
-                values.append(especiales)
-                colors.append("#0f6a62")
-            fig = go.Figure(
-                data=[
-                    go.Pie(
-                        labels=labels,
-                        values=values,
-                        hole=0.35,
-                        marker=dict(colors=colors, line=dict(color="#fffdf8", width=1)),
-                    )
-                ]
-            )
-            fig.update_layout(
-                title="Régimen EPS (Cali)",
-                title_x=0.5,
-                title_xanchor="center",
-                margin=dict(l=18, r=18, t=36, b=24),
-                showlegend=True,
-            )
-            fig = style_chart(fig)
-            chart_container(fig)
+        eps_probs["Riesgo"] = eps_probs["Score_Final"].map(risk_bucket)
+        eps_probs["prob_imputada"] = eps_probs["prob_imputada"].map({True: "Si", False: "No"})
+        eps_fmt = {
+            "Score_Final": "{:.1f}",
+            "Score_Riesgo": "{:.1f}",
+            "Score_Mercado": "{:.1f}",
+            "MarketShare_Valle": "{:.2%}",
+        }
+        eps_fmt.update({col: "{:.2%}" for col in PROBABILITY_COLUMNS})
+        st.dataframe(
+            eps_probs.style.format(eps_fmt),
+            width="stretch",
+            hide_index=True,
+        )
 
     divider()
-    section_header("Bloques financieros", "Cuentas usadas y valores por año")
-    explain_box(
-        "Como se calcula",
-        [
-            "Cada bloque agrega cuentas contables específicas (REV, AC, PC, etc.).",
-            "Los valores son anuales y en millones de COP.",
-        ],
-    )
-    st.caption("Valores en millones de COP.")
-    st.caption(f"Fuente: {eps_source}")
-    st.dataframe(blocks_table(selected_eps), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Liquidez")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios basados en activos y pasivos corrientes.",
-            "Se resaltan mejoras/deterioros respecto al año anterior.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    ratio_df, flags_df, delta_cols = ratio_table(selected_eps, liquidity_ratios, ratio_labels, ratio_kinds)
-    st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Endeudamiento / Solvencia")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de apalancamiento y estructura de pasivos.",
-            "Se resaltan mejoras/deterioros respecto al año anterior.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    ratio_df, flags_df, delta_cols = ratio_table(selected_eps, solvency_ratios, ratio_labels, ratio_kinds)
-    st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Rentabilidad")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de margen y retorno sobre activos.",
-            "Se resaltan mejoras/deterioros respecto al año anterior.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    ratio_df, flags_df, delta_cols = ratio_table(selected_eps, profitability_ratios, ratio_labels, ratio_kinds)
-    st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Eficiencia / Actividad")
-    explain_box(
-        "Como se calcula",
-        [
-            "Rotaciones, días de cartera/proveedores y eficiencia de costos.",
-            "Se resaltan mejoras/deterioros respecto al año anterior.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    ratio_df, flags_df, delta_cols = ratio_table(selected_eps, efficiency_ratios, ratio_labels, ratio_kinds)
-    st.dataframe(style_ratio_table(ratio_df, flags_df, delta_cols), use_container_width=True)
+    section_header("Fuentes cargadas")
+    st.caption(eps_eeff_src)
+    st.caption(upc_src)
+    st.caption(eps_edad_src)
+    st.caption(eps_anos_src)
+    st.caption(eps_afiliados_src)

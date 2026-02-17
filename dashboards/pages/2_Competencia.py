@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -18,29 +18,31 @@ import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps, load_eps_financials
 from dashboards.ui import (
-    apply_theme,
     append_avg_column,
     append_total_row,
+    apply_theme,
+    bullet_card,
     chart_container,
     divider,
     explain_box,
     page_header,
     section_header,
     style_chart,
+    subsection_selector,
+    text_card,
 )
 from src.models.eps_scoring import (
     BLOCK_DEFS,
     RATIO_SPECS,
-    apply_size_factors,
     aggregate_scores,
+    apply_size_factors,
     build_blocks_long,
-    compute_ratios,
     compute_net_income_factor,
+    compute_ratios,
     compute_revenue_factor,
     score_ratios,
     winsorize_ratios,
 )
-
 
 st.set_page_config(page_title="Competencia", layout="wide")
 apply_theme()
@@ -67,7 +69,7 @@ page_header(
 
 with st.sidebar:
     st.header("Filters")
-    st.caption("Archivo: Cali ANALISIS.xlsx (hoja IPS EEFF)")
+    st.caption("Archivo: Cali ANALISIS.xlsx (hoja IPS_EEFF)")
     st.subheader("Pesos del Score Financiero")
     w_liquidity = st.slider(
         "Liquidez (%)",
@@ -106,6 +108,15 @@ def normalize_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKD", str(text))
     normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
     return " ".join(normalized.upper().split())
+
+
+def find_col(columns: List[str], includes: List[str]) -> str | None:
+    tokens = [normalize_text(token) for token in includes]
+    for col in columns:
+        norm = normalize_text(col)
+        if all(token in norm for token in tokens):
+            return col
+    return None
 
 
 def accounts_used(df: pd.DataFrame, accounts: List[str]) -> str:
@@ -220,10 +231,19 @@ def blocks_table(selected: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-ips_df, ips_source = load_eps_financials("IPS EEFF")
-serv_df, serv_source = load_cifras_eps("Serv_IPS")
-ci_df, ci_source = load_cifras_eps("CI_IPS")
+ips_df, ips_source = load_eps_financials("IPS_EEFF")
+servicios_matrix_df, servicios_matrix_source = load_cifras_eps("Servicios")
+capacidad_df, capacidad_source = load_cifras_eps("Capacidad")
+if capacidad_df.empty:
+    alt_capacidad_df, alt_capacidad_source = load_cifras_eps("CAPACIDAD")
+    if not alt_capacidad_df.empty:
+        capacidad_df, capacidad_source = alt_capacidad_df, alt_capacidad_source
 tarifas_comp_df, tarifas_comp_source = load_cifras_eps("TarifasCompetencia")
+tarifas_esc_df, tarifas_esc_source = load_cifras_eps("Tarifas_Escenarios")
+if tarifas_esc_df.empty:
+    alt_tarifas_esc_df, alt_tarifas_esc_source = load_cifras_eps("Tarifas Escenarios")
+    if not alt_tarifas_esc_df.empty:
+        tarifas_esc_df, tarifas_esc_source = alt_tarifas_esc_df, alt_tarifas_esc_source
 
 if ips_df.empty:
     st.warning("No se encontro el archivo de estados financieros IPS o no se pudo leer.")
@@ -233,7 +253,7 @@ if ips_df.empty:
 year_cols = [c for c in ips_df.columns if str(c).strip().isdigit()]
 year_cols = sorted(year_cols, key=lambda x: int(x))
 if not year_cols:
-    st.warning("No se encontraron columnas de anos en la hoja IPS EEFF.")
+    st.warning("No se encontraron columnas de anos en la hoja IPS_EEFF.")
     st.stop()
 
 if "IPS" in ips_df.columns and "EPS_clean" not in ips_df.columns:
@@ -349,7 +369,6 @@ efficiency_ratios = ["asset_turnover", "dso", "dpo", "opex_cash_ratio", "da_inte
 
 
 def ratio_table(selected: str, ratio_list: List[str]) -> pd.DataFrame:
-    import numpy as np
 
     subset = ratios_df[ratios_df["entity"] == selected]
     rows = []
@@ -368,8 +387,492 @@ def ratio_table(selected: str, ratio_list: List[str]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     return df
 
-tab_analisis, tab_ips, tab_cap, tab_serv, tab_tarifas = st.tabs(
-    ["Analisis", "Analisis IPS", "Capacidad instalada", "Servicios", "Tarifas IPS"]
+
+def norm_key(text: str) -> str:
+    return normalize_text(text).lower().strip()
+
+
+def qualitative_profile(selected_ips: str) -> dict | None:
+    key = norm_key(selected_ips)
+
+    if "angiografia de occidente" in key:
+        return {
+            "title": "Angiografia de Occidente S.A.",
+            "sections": [
+                (
+                    "Participaciones / vinculos accionarios",
+                    [
+                        "Senal de vinculo accionario con Clinica de Occidente: en fuentes periodisticas referidas se menciona que Angiografia de Occidente habria sido mayor accionista de Clinica de Occidente (contexto 2016).",
+                    ],
+                ),
+                (
+                    "Dotacion / tecnologia (marca/modelo)",
+                    [
+                        "Marcas: MEDTRONIC, BAYER, ST JUDE MEDICAL, ABBOTT, CTP MEDICAS, ALLERS, BOSTON SCIENTIFIC y TERUMO.",
+                        "Compras realizadas a estas 8 empresas en 2024: $40.146 millones.",
+                    ],
+                ),
+                (
+                    "Unidades de Cardiologia No Invasiva",
+                    [
+                        "Ecocardiograma Modo M, Bidimensional y Doppler Color.",
+                        "Ecocardiograma de Estres con Ejercicio o Suministro de Farmaco.",
+                        "Ecocardiograma Transesofagico.",
+                        "Prueba Ergometrica o Test de Ejercicio.",
+                        "Electrocardiografia Dinamica 24 Horas (Test de Holter).",
+                        "Monitoria Ambulatoria de Presion Arterial (MAPA).",
+                        "Electrocardiograma de Ritmo o de Superficie SOD.",
+                    ],
+                ),
+                (
+                    "Unidad de consulta externa",
+                    [
+                        "Cardiologia Adulto.",
+                        "Cardiologia Pediatrica.",
+                        "Programa de Falla Cardiaca y Anticoagulados.",
+                        "Hemodinamia.",
+                        "Electrofisiologia.",
+                        "Reprogramacion de Marcapasos.",
+                        "Cardiologia no Invasiva.",
+                        "Neuroradiologia.",
+                        "Radiologia Intervencionista.",
+                        "Cirugia Vascular periferico.",
+                        "Riesgo Metabolico.",
+                        "Medicina Interna.",
+                        "Medicina General.",
+                    ],
+                ),
+                (
+                    "Unidades IPS",
+                    [
+                        "Cardiologia.",
+                        "Cirugia General.",
+                        "Cirugia Vascular Periferica.",
+                        "Citologias.",
+                        "Dermatologia.",
+                        "Enfermeria.",
+                        "Fisioterapeuta.",
+                        "Gastroenterologia.",
+                        "Ginecologia y Obstetricia.",
+                        "Higiene Oral.",
+                        "Medicina Fisica y Rehabilitacion.",
+                        "Medicina General.",
+                        "Medicina Interna.",
+                        "Nefrologia.",
+                        "Neumologia.",
+                        "Neurologia.",
+                        "Nutricionista.",
+                        "Obstetricia.",
+                        "Odontologia.",
+                        "Ortopedia y Traumatologia.",
+                        "Otorrinolaringologia.",
+                        "P&P.",
+                        "Pediatria.",
+                        "Programas especiales (Diabetes, Hipertension, EPOC, Insuficiencia Renal Cronica).",
+                        "Psicologia.",
+                        "Trabajo Social.",
+                        "Urologia.",
+                        "Vacunacion.",
+                    ],
+                ),
+                (
+                    "Contratos mencionados",
+                    [
+                        "Cirugia Vascular: Contrato IPS Nueva EPS; Contrato PGP Coosalud; consultas por evento con entidades varias.",
+                        "Cardiologia - Falla Cardiaca y Anticoagulacion: Contrato IPS Nueva EPS; Contrato PGP Coosalud; Contrato VIVA 1A para poblacion Cali, Jamundi y Yumbo; consultas por evento con entidades varias.",
+                        "Hemodinamia: Contrato PGP Nueva EPS; Contrato PGP Coosalud; consultas por evento con entidades varias.",
+                        "Electrofisiologia: revision de marcapaso; Contrato PGP Nueva EPS; Contrato PGP Coosalud; consultas por evento con entidades varias.",
+                        "Neuroradiologia: Contrato PGP Coosalud; consultas por evento con entidades varias.",
+                        "Radiologia Intervencionista: Contrato PGP Coosalud; consultas por evento con entidades varias.",
+                    ],
+                ),
+                (
+                    "Unidades de Angiografia - Hemodinamia",
+                    [
+                        "Cateterismos cardiacos izquierdos y derechos.",
+                        "Arteriografias coronarias.",
+                        "Angioplastias coronarias.",
+                        "Cierre percutaneo de defectos cardiacos septales.",
+                        "TAVI - Implante valvular aortico percutaneo.",
+                        "Valvuloplastia aortica, pulmonar y mitral.",
+                        "Implante de balon de contrapulsacion intraaortico percutaneo.",
+                        "Reparo de valvula mitral con dispositivo MitraClip por via endovascular.",
+                        "Cierre de auriculilla izquierda con dispositivo endovascular.",
+                        "Tomografia optica coherente intravascular (TOC).",
+                        "Cierre de fuga paravalvular aortica o mitral por via endovascular.",
+                        "Implante valvular pulmonar.",
+                        "Denervacion renal por via endovascular.",
+                        "Pericardiocentesis terapeutica.",
+                        "Ablacion septal con alcohol.",
+                        "Ultrasonido intravascular intracoronario (IVUS).",
+                        "Implante valvular mitral percutaneo.",
+                        "Reparo de coartacion de aorta por via endovascular.",
+                        "Tromboembolectomia intracoronaria.",
+                        "Trombectomia coronaria.",
+                    ],
+                ),
+                (
+                    "Unidades de Angiografia - Hemodinamia Pediatrica",
+                    [
+                        "Cateterismo cardiaco derecho e izquierdo.",
+                        "Valvuloplastia aortica, pulmonar y mitral con balon.",
+                        "Cierre percutaneo de defectos cardiacos septales.",
+                        "Correccion de coartacion de aorta.",
+                        "Embolizacion de colaterales aorto-pulmonares.",
+                    ],
+                ),
+                (
+                    "Unidades de Angiografia - Vascular Periferico y Radiologia Intervencionista",
+                    [
+                        "Trombectomia de vasos arteriales o venosos.",
+                        "Tromboembolectomia periferica.",
+                        "Venografia - Cavografia - Flebografia.",
+                        "Aortograma abdominal.",
+                        "Arteriografia de miembros inferiores/superiores, renal, bronquial o mesenterica.",
+                        "Oclusiones perifericas.",
+                        "Angioplastia periferica.",
+                        "Implante de filtro en vena cava.",
+                        "Quimioembolizacion hepatica.",
+                        "Implante de cateter de alto flujo para dialisis.",
+                        "Implante de cateter de nefrostomia.",
+                        "Implante de cateter venoso central.",
+                        "Implante de endoprotesis toracica y/o abdominal y/o fenestrada.",
+                        "Embolizacion de tumores.",
+                        "Trombectomia pulmonar.",
+                    ],
+                ),
+                (
+                    "Unidades de Angiografia - Electrofisiologia",
+                    [
+                        "Extraccion de electrodo de estimulacion, desfibrilacion y/o seno coronario.",
+                        "Extraccion de cuerpo extrano.",
+                        "Implante de marcapasos unicameral definitivo.",
+                        "Implante de marcapasos bicameral definitivo.",
+                        "Implante de marcapasos resincronizador definitivo.",
+                        "Implante de cardiodesfibrilador definitivo transvenoso.",
+                        "Estudio electroanatomico con mapeo no fluoroscopico y ablacion con cateter irrigado (tecnologia EnSite).",
+                        "Cambio de electrodo de marcapasos.",
+                        "Implante de monitor de eventos.",
+                        "Explante de monitor de eventos.",
+                        "Estudio electrofisiologico diagnostico.",
+                        "Estudio electrofisiologico completo con mapeo y ablacion por radiofrecuencia.",
+                        "Cardioversion electrica.",
+                        "Implante de marcapasos transitorio.",
+                    ],
+                ),
+                (
+                    "Unidades de Angiografia - Neuroradiologia",
+                    [
+                        "Angiografia cerebral o espinal.",
+                        "Cayado aortico.",
+                        "Angiografia de vasos de cuello.",
+                        "Angioplastia carotida-vertebral.",
+                        "Angioplastia quimica.",
+                        "Oclusiones vertebrales y cerebrales.",
+                        "Trombolisis vertebrales.",
+                        "Trombectomia de vasos intracraneales y de cabeza/cuello.",
+                    ],
+                ),
+                (
+                    "EPS",
+                    [
+                        "Septiembre 2025: cierre/suspension temporal y reapertura en contexto de cartera con Nueva EPS, con participacion de actores institucionales en mesas de trabajo (segun fuentes referidas).",
+                    ],
+                ),
+            ],
+            "income_mix_2024": [
+                {"Cliente": "Nueva EPS", "Participacion": 65.0},
+                {"Cliente": "Coosalud", "Participacion": 8.8},
+                {"Cliente": "SOS", "Participacion": 4.0},
+                {"Cliente": "Clinica Versalles", "Participacion": 4.0},
+                {"Cliente": "Clinica Farallones", "Participacion": 3.2},
+                {"Cliente": "Otros clientes", "Participacion": 14.9},
+            ],
+            "references": [
+                {
+                    "label": "Informe de Gestion y Sostenibilidad 2024 (PDF)",
+                    "url": "file:///C:/Users/analistagerencia/Downloads/INFORME%20DE%20GESTI%C3%93N%20Y%20SOSTENIBILIDAD%20ANGIOGRAF%C3%8DA%20DE%20OCCIDENTE%202024%20-%20ADO.pdf",
+                },
+            ],
+        }
+
+    if "clinica de occidente" in key:
+        return {
+            "title": "Clinica de Occidente",
+            "sections": [
+                (
+                    "Participaciones / integracion patrimonial (relevante)",
+                    [
+                        "Participacion accionaria en EPS: inversion del 0,25% en Coomeva EPS S.A. en Liquidacion, reportada a 31-dic-2023.",
+                        "Subsidiaria 100%: Resonancia de Occidente S.A.S. (100% participacion), segun EEFF referidos.",
+                    ],
+                ),
+                (
+                    "Dotacion / tecnologia (marca/modelo)",
+                    [
+                        "Informe Anual 2022: Siemens Somaton Drive, Syngo VIA, Somaton Go SIM, Somaton GO UP y Arco en C Cios.",
+                        "Informe Anual 2022: Canon Toshiba Ecografo Aplio.",
+                    ],
+                ),
+                (
+                    "Cadena de suministro / compras (solo decisional)",
+                    [
+                        "Modelo formal de gestion y calificacion de proveedores (criticidad + evaluacion por cumplimiento/comercial/calidad/post-contractual) reportado por la clinica.",
+                    ],
+                ),
+                (
+                    "EPS (riesgo / friccion cuantificable)",
+                    [
+                        "Cuentas por cobrar al 31-dic-2023 (miles COP): Nueva EPS $136.416.780 (~COP 136,4 mil millones).",
+                        "Cuentas por cobrar al 31-dic-2023 (miles COP): Salud Total $29.953.140 (~COP 30,0 mil millones).",
+                        "Cuentas por cobrar al 31-dic-2023 (miles COP): Coosalud $26.567.017 (~COP 26,6 mil millones).",
+                        "Mencion de renovacion contractual en 1S-2023 con EPS Sanitas (nota referida).",
+                    ],
+                ),
+            ],
+            "particular_procedure_mix_2024": [
+                {"Procedimiento": "Endoscopia", "Participacion": 19.0},
+                {"Procedimiento": "Laboratorio", "Participacion": 15.0},
+                {"Procedimiento": "Adscritos", "Participacion": 12.0},
+                {"Procedimiento": "Consulta Externa", "Participacion": 12.0},
+                {"Procedimiento": "Hospitalizacion", "Participacion": 11.0},
+                {"Procedimiento": "Imagenes", "Participacion": 11.0},
+                {"Procedimiento": "Cirugia", "Participacion": 7.0},
+                {"Procedimiento": "Otros", "Participacion": 14.0},
+            ],
+            "particular_income_2024": 1372993378,
+        }
+
+    if "dime" in key and "neurocardiovascular" in key:
+        return {
+            "title": "DIME Clinica Neurocardiovascular S.A.",
+            "sections": [
+                (
+                    "Dotacion / tecnologia (marca/modelo)",
+                    [
+                        "Angiografo biplano Philips Azurion 7 B20/15 (declaracion institucional referida).",
+                        "Alianza para inversion tecnologica: Philips + Banco de Occidente (financiacion/condiciones de inversion a largo plazo, segun publicacion referida).",
+                    ],
+                ),
+            ],
+        }
+
+    if "imbanaco" in key:
+        return {
+            "title": "Clinica Imbanaco S.A.S.",
+            "sections": [
+                (
+                    "Control / estructura corporativa (impacto estrategico)",
+                    [
+                        "Adquisicion mayoritaria/control por Helios Healthcare Spain S.L., controlada por Else Kroner-Fresenius-Stiftung, desde 12-feb-2020 (segun lo citado).",
+                    ],
+                ),
+                (
+                    "Cadena de suministro (barrera competitiva)",
+                    [
+                        "En EEFF se describe uso de contratos de comodato con proveedores (equipos ligados a insumos/condiciones; vida util, sanciones, opcion de compra). Esto es clave por lock-in tecnologico y comercial.",
+                    ],
+                ),
+                (
+                    "EPS / acuerdos no estandar",
+                    [
+                        "Convenio PGP (pago prospectivo) con pago anticipado para gastroenterologia ambulatoria, evidenciado en EEFF 2019/2018 (y verificacion en red PBS segun el documento).",
+                        "Enero 2025: referencia como nuevo prestador para ruta oncologica de Servicio Occidental de Salud (SOS).",
+                    ],
+                ),
+            ],
+        }
+
+    if "valle del lili" in key or ("fundacion" in key and "lili" in key):
+        return {
+            "title": "Fundacion Valle del Lili",
+            "sections": [
+                (
+                    "Dotacion / tecnologia (marca/modelo + capacidades)",
+                    [
+                        "Resonancia Siemens Magnetom Sola.",
+                        "Radioterapia: TrueBeam, BRAVOS y tomografo Somaton (segun publicacion institucional referida).",
+                        "Cardio intervencionista/estructural: oferta con TAVI/TAVR, MitraClip, y soporte de IVUS y FFR (OCT proximamente segun texto). MitraClip identificado como dispositivo de Abbott en referencia tecnica incluida.",
+                    ],
+                ),
+                (
+                    "Cadena de suministro (operativo decisional)",
+                    [
+                        "Portal de proveedores y proceso formal de relacionamiento/facturacion (onboarding administrativo).",
+                    ],
+                ),
+            ],
+        }
+
+    return None
+
+
+def render_services_matrix(selected_ips: str | None = None) -> None:
+    section_header("Matriz de servicios por IPS", "Fuente: hoja Servicios")
+    explain_box(
+        "Como se calcula",
+        [
+            "Filas: IPS; columnas: servicios.",
+            "Los dummies se transforman de 0/1 a NO/SI.",
+            "Se colorea SI en verde y NO en gris para lectura rapida.",
+        ],
+    )
+
+    if servicios_matrix_df.empty:
+        st.warning("No se pudo leer la hoja Servicios.")
+        st.caption(f"Detalle: {servicios_matrix_source}")
+        return
+
+    matrix = servicios_matrix_df.copy().dropna(axis=0, how="all").dropna(axis=1, how="all")
+    cols = [str(c) for c in matrix.columns]
+    ips_col = next(
+        (
+            c
+            for c in cols
+            if any(token in normalize_text(c) for token in ["ips", "prestador", "entidad", "nombre"])
+        ),
+        cols[0] if cols else None,
+    )
+
+    if ips_col is None or matrix.empty:
+        st.info("La hoja Servicios no contiene estructura valida para matriz.")
+        return
+
+    def to_dummy(value: object) -> float | None:
+        if pd.isna(value):
+            return None
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+        text = normalize_text(value)
+        if text in {"si", "s", "x", "true", "verdadero", "1"}:
+            return 1.0
+        if text in {"no", "n", "false", "falso", "0", ""}:
+            return 0.0
+        num = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(num):
+            return None
+        if num == 0:
+            return 0.0
+        if num == 1:
+            return 1.0
+        return None
+
+    dummy_cols = []
+    parsed_cols: dict[str, pd.Series] = {}
+    for col in cols:
+        if col == ips_col:
+            continue
+        parsed = matrix[col].map(to_dummy)
+        non_null = parsed.dropna()
+        if non_null.empty:
+            continue
+        if non_null.isin([0.0, 1.0]).all():
+            dummy_cols.append(col)
+            parsed_cols[col] = parsed
+
+    if not dummy_cols:
+        st.info("No se detectaron columnas dummy (0/1) en la hoja Servicios.")
+        return
+
+    view = pd.DataFrame()
+    view["IPS"] = matrix[ips_col].astype(str).str.strip()
+    view = view[view["IPS"].notna() & (view["IPS"] != "")]
+    for col in dummy_cols:
+        parsed = parsed_cols[col].reindex(view.index)
+        view[col] = parsed.map(lambda x: "SI" if x == 1 else "NO")
+
+    if selected_ips:
+        view["__key"] = view["IPS"].map(norm_key)
+        selected_key = norm_key(selected_ips)
+        if (view["__key"] == selected_key).any():
+            view = pd.concat(
+                [
+                    view[view["__key"] == selected_key],
+                    view[view["__key"] != selected_key],
+                ],
+                ignore_index=True,
+            )
+        view = view.drop(columns=["__key"])
+
+    def yes_no_style(val: object) -> str:
+        if val == "SI":
+            return "background-color: #d3f9d8; color: #1b4332; font-weight: 600; text-align: center;"
+        if val == "NO":
+            return "background-color: #e9ecef; color: #495057; font-weight: 600; text-align: center;"
+        return ""
+
+    styled = view.style.applymap(yes_no_style, subset=dummy_cols)
+    st.dataframe(styled, width='stretch', hide_index=True)
+    st.caption(f"Fuente: {servicios_matrix_source}")
+
+
+def render_capacity_instalada() -> None:
+    section_header("Capacidad instalada por IPS", "Fuente: hoja Capacidad")
+    explain_box(
+        "Como se calcula",
+        [
+            "Se usa la hoja Capacidad del Excel Cali ANALISIS.",
+            "Se normaliza la primera columna como nombre de IPS.",
+            "Se muestran columnas numericas y descriptivas con fila TOTAL para capacidades.",
+        ],
+    )
+
+    if capacidad_df.empty:
+        st.warning("No se pudo leer la hoja Capacidad.")
+        st.caption(f"Detalle: {capacidad_source}")
+        return
+
+    work = capacidad_df.copy().dropna(axis=0, how="all").dropna(axis=1, how="all")
+    if work.empty:
+        st.warning("La hoja Capacidad no contiene datos utiles.")
+        st.caption(f"Detalle: {capacidad_source}")
+        return
+
+    cols = [str(c).strip() for c in work.columns]
+    ips_col = (
+        find_col(cols, ["ips"])
+        or find_col(cols, ["prestador"])
+        or find_col(cols, ["entidad"])
+        or find_col(cols, ["clinica"])
+        or find_col(cols, ["fundacion"])
+        or cols[0]
+    )
+
+    view = work.rename(columns={ips_col: "IPS"}).copy()
+    view["IPS"] = view["IPS"].astype(str).str.strip()
+    view = view[view["IPS"].notna() & (view["IPS"] != "")]
+
+    ordered_cols = ["IPS"] + [c for c in view.columns if c != "IPS"]
+    view = view[ordered_cols]
+
+    numeric_cols: list[str] = []
+    for col in view.columns:
+        if col == "IPS":
+            continue
+        parsed = pd.to_numeric(view[col], errors="coerce")
+        if parsed.notna().any():
+            view[col] = parsed
+            numeric_cols.append(col)
+
+    total_row = {"IPS": "TOTAL"}
+    for col in view.columns:
+        if col == "IPS":
+            continue
+        if col in numeric_cols:
+            total_row[col] = pd.to_numeric(view[col], errors="coerce").sum(min_count=1)
+        else:
+            total_row[col] = ""
+    view = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
+
+    fmt = {
+        col: (lambda v: "" if pd.isna(v) else f"{v:,.0f}")
+        for col in numeric_cols
+    }
+    st.dataframe(view.style.format(fmt), width='stretch', hide_index=True)
+    st.caption(f"Fuente: {capacidad_source}")
+
+tab_analisis, tab_ips, tab_tarifas = st.tabs(
+    ["Analisis", "Analisis IPS", "Tarifas IPS"]
 )
 
 with tab_analisis:
@@ -505,7 +1008,7 @@ with tab_analisis:
                     "Utilidad Neta": fmt_currency,
                 }
             ),
-            use_container_width=True,
+            width='stretch',
         )
 
         divider()
@@ -538,7 +1041,7 @@ with tab_analisis:
             score_last = pd.concat([score_last, pd.DataFrame([avg_row])], ignore_index=True)
             st.dataframe(
                 score_last.style.format({"Score Financiero": "{:.1f}"}),
-                use_container_width=True,
+                width='stretch',
             )
 
             divider()
@@ -590,455 +1093,220 @@ with tab_analisis:
             score_pivot = pd.concat([score_pivot, avg_row])
             st.dataframe(
                 score_pivot.style.format({year: "{:.1f}" for year in score_pivot.columns}),
-                use_container_width=True,
+                width='stretch',
             )
 
     divider()
-    section_header("Ubicacion estrategica", "Sector Melendez y Comuna 18")
-    explain_box(
-        "Como se calcula",
-        [
-            "Seccion descriptiva con datos demograficos y urbanisticos.",
-            "No hay calculos financieros, solo contexto territorial.",
-        ],
-    )
-    st.markdown("""
-**4. Ubicacion estrategica: Sector Melendez y Comuna 18**
+    render_capacity_instalada()
 
-**4.1 Caracterizacion del Sector Melendez**
-- Ubicacion propuesta: Calle 5 con Carrera 95
-- Barrio/Sector: Melendez
-- Comuna: 18 (sur-occidente de Cali)
-""")
-
-    demo_df = pd.DataFrame(
-        {
-            "Indicador": [
-                "Poblacion total",
-                "% poblacion Cali",
-                "Distribucion sexo",
-                "Area",
-                "Densidad poblacional",
-                "Viviendas",
-                "Predios construidos",
-            ],
-            "Valor": [
-                "100,276 habitantes",
-                "4.9%",
-                "Hombres: 49.2% / Mujeres: 50.8%",
-                "542.9 hectareas (4.5% de Cali)",
-                "184.7 hab/ha (promedio Cali: 168.7)",
-                "24,705 (4.9% del total de Cali)",
-                "16,782",
-            ],
-        }
-    )
-    st.dataframe(demo_df, use_container_width=True, hide_index=True)
-
-    st.markdown("**Estratificacion Comuna 18**")
-    strat_df = pd.DataFrame(
-        {
-            "Estrato": ["1", "2", "3 (Moda)", "4", "5 y 6", "TOTAL E2+E3"],
-            "% Lados de Manzana": ["Minoritario", "~30%", "~43%", "1.2%", "0%", "72.9%"],
-            "Observacion": ["Presente", "Significativo", "Predominante", "Marginal", "Ausentes", "Poblacion objetivo"],
-        }
-    )
-    st.dataframe(strat_df, use_container_width=True, hide_index=True)
-    st.caption("Hallazgo: 72.9% de viviendas en estratos 2 y 3, alineado con el segmento objetivo.")
-
-    st.markdown("""
-**4.2 Proyecto urbanistico Ciudad Melendez**
-- Plan parcial aprobado en 2010.
-- Area total de planificacion: 152 ha
-- Area de desarrollo: 75 ha
-- Area de reserva: 54 ha
-- Cinturon ecologico: 23 ha
-- Ubicacion: entre calles 59 y 61, carreras 93 y 95.
-
-**Ventajas de la ubicacion**
-- Desarrollo moderno con infraestructura planificada
-- Conexion al transporte publico masivo (MIO)
-- Cercania a centros comerciales e instituciones educativas
-- Acceso vial directo a Calle 5 (eje principal este-oeste)
-""")
-
-    st.markdown("**4.3 Ventaja geografica y estrategica**")
-    st.markdown("""
-- Acceso zona oriente (comunas 13, 14, 15, 16, 21): 8-10 km, 15-25 min, poblacion potencial 620,000.
-- Cobertura zona ladera (comunas 1, 18, 20): 340,000 habitantes.
-- Conexion sur y centro-sur (comunas 17, 22, 11, 12): ~200,000 habitantes.
-- Mercado total accesible: >1,160,000 habitantes estratos 1-2-3 en 10-15 km.
-""")
-
-    comp_df = pd.DataFrame(
-        {
-            "Institucion": ["ICB Melendez", "Valle del Lili", "Imbanaco", "DIME", "HUV"],
-            "Distancia a Oriente": ["8-10 km", "15-18 km", "12-15 km", "12-16 km", "10-12 km"],
-            "Tiempo estimado": ["15-25 min", "30-45 min", "25-40 min", "25-40 min", "20-35 min"],
-        }
-    )
-    st.dataframe(comp_df, use_container_width=True, hide_index=True)
-    st.caption(
-        "Ventaja competitiva: el ICB seria el centro especializado mas cercano "
-        "a la zona con mayor concentracion de poblacion vulnerable."
-    )
+    divider()
+    render_services_matrix()
 with tab_ips:
-    section_header("Estados financieros", "IPS individual")
+    section_header("Analisis IPS", "Vista cuantitativa y cualitativa")
     explain_box(
         "Como se calcula",
         [
-            "Vista detallada por IPS seleccionada.",
-            "Se separa estado de resultados y balance general según orden del Excel.",
+            "La vista Cuantitativo mantiene estados financieros, subscores y ratios.",
+            "La vista Cualitativo consolida contexto narrativo por IPS.",
+            "El contenido se organiza para lectura ejecutiva y trazabilidad.",
         ],
     )
     selected_ips = st.selectbox("IPS", ips_list, index=0, format_func=lambda x: str(x).upper())
-
-    divider()
-    section_header("Analisis cualitativo", "Resumen ejecutivo por IPS")
-    explain_box(
-        "Como se calcula",
-        [
-            "Texto cualitativo preparado por el equipo.",
-            "Se enfoca en factores financieros, riesgos y contexto operativo.",
-        ],
+    ips_view = subsection_selector(
+        ["Cuantitativo", "Cualitativo"],
+        key="competencia_ips_view",
+        label="Vista IPS",
     )
 
-    def norm_key(text: str) -> str:
-        return normalize_text(text).lower().strip()
+    if ips_view == "Cuantitativo":
+        section_header("Bloques financieros", "Cuentas usadas y valores por ano")
+        explain_box(
+            "Como se calcula",
+            [
+                "Bloques construidos a partir de cuentas contables especificas.",
+                "Valores anuales en millones de COP.",
+            ],
+        )
+        st.caption(f"Fuente: {ips_source}")
+        st.dataframe(blocks_table(selected_ips), width='stretch')
 
-    QUALITATIVE_NOTES = {
-        "fundacion valle del lili": """
-**1. Situacion financiera general (2024 vs 2023)**
-- 2024: **Utilidad** de **$1.056 millones**
-- 2023: **Perdida** de **$10.467 millones**
-- Cambio: **recuperacion de $11.523 millones (+110%)**
-
-**Hallazgo clave:** la utilidad es **minima** (0,07% sobre ingresos de $1,6 billones). Aunque se salio de perdidas, las utilidades siguen muy bajas.
-
-**2. Principales factores que afectaron utilidades**
-
-**A. Explosion del deterioro de cartera (Factor #1)**
-- Deterioro de cartera 2024: **$122.388 millones** (vs $47.857M en 2023) **+156%**
-- Provision de glosas 2024: **$1.802 millones** (vs $52M en 2023) **+3.365%**
-- Total provisiones 2024: **$124.190 millones** (vs $47.909M) **+159%**
-
-**Por que:** crisis del sector salud; EPS intervenidas con bajo pago (Nueva EPS, SOS, Sanitas, Coosalud, Asmet Salud, Emssanar).
-- Cartera vencida: **$622.972M -> $866.550M (+39%)**
-- Cartera >360 dias: **$173.058M (20% del total)**
-- Texto del documento: incremento en provisiones por deudores debido a disminucion de pagos y aumento de cuentas por cobrar.
-
-**B. Aumento de gastos financieros (Factor #2)**
-- Intereses prestamos: **$64.460M** (vs $37.652M) **+71%**
-- Gasto financiero neto: **$33.138M** (vs $68.170M) **-51%**
-- Deuda total: **$495.206M** (vs $310.794M) **+59%**
-
-**Drivers:** expansion, capital de trabajo por cartera y tasas de interes mas altas.
-Nota positiva: menor capitalizacion de intereses en 2024 ($2.244M vs $6.487M en 2023).
-
-**C. Aumento de costos operacionales**
-- Costo de ventas: **$1.330.592M** (vs $1.213.666M) **+9,6%**
-- Gastos de administracion: **$236.589M** (vs $156.643M) **+51%**
-- Drivers: materiales (+12,3%), honorarios medicos (+11,6%), depreciacion (+9,9%), personal (+7,7%).
-
-**3. Expansiones e inversiones (explican caida de utilidades)**
-- Inversion en activos fijos 2024: **$90.990M**
-- Torre 2 en construccion: **$63.732M** (vs $43.561M)
-- Adquisicion nuda propiedad: **$28.507M**
-- Usufructo -> propiedad plena: terrenos **+ $61.627M**, edificios **+ $128.944M**
-- Torre 8 (anteproyecto): inversion proyectada **$150.000M**
-- Expansion Sede Limonar: crecimiento de consultorios y camas
-- Equipamiento medico y tecnologico: **$20.068M** aprox.
-
-**4. Red de sedes (6)**
-- Sede Principal (Carrera 98 # 18-49)
-- Sede Limonar
-- Sede Centenario
-- Sede Av. Estacion
-- Sede Betania
-- Sede Alfaguara (Jamundi)
-
-**5. Multas y sanciones**
-- No se evidencian multas materiales Supersalud 2023-2024.
-- Certificaciones: ICONTEC 2024, Hospital Universitario, JCI (dic 2024).
-
-**6. Politicas contables / cambios**
-- Deterioro ampliado 2024: provision general adicional **$14.585M**
-- Base: 10% del ingreso promedio mensual presupuestado 2025.
-- Efecto: prudente, pero reduce utilidades.
-
-**7. Otras notas**
-- Inversiones USD: **$127.700M**; ganancia por devaluacion: **$6.843M**.
-- Donaciones: **$4.991M** (vs $1.028M), foco en investigacion.
-- Episodios 2022: 1.255.144; ingresos 2024 crecieron 12,14%.
-""",
-        "dime clinica neurocardiovascular": """
-**Informacion general**
-- Fundacion: 25 de enero de 1988 (mas de 35 anos de experiencia)
-- Ubicacion: Avenida 5 Norte #20-75, Cali, Valle del Cauca
-- Empleados: 417 personas (2025)
-- Especializacion: clinica de alta complejidad en enfermedades neurocardiovasculares
-- Subsidiarias: DIME Cardiovascular S.A. (51%) y DIME Angiografia S.A. (10%)
-
-**Eventos relevantes para analisis financiero**
-
-**1. Acreditacion en salud - ICONTEC (2019-2023)**
-- Primera acreditacion: enero 2019 (44 instituciones acreditadas en Colombia).
-- Reconocimientos 2019-2023: Medalla Santiago de Cali, Merito Civico, Merito Vallecaucano.
-- Renovacion junio 2023: ratificada por ICONTEC.
-- Impacto: inversion sostenida en estandarizacion, capacitacion y mejoramiento continuo.
-
-**2. Desarrollo de programas especializados**
-- CACI activos desde 2019: insuficiencia cardiaca, trasplante cardiaco, sindrome coronario agudo, ataque cerebrovascular (WSO).
-- Trasplante cardiaco: una de 10 instituciones autorizadas en Colombia; una de 3 en Cali.
-- Impacto financiero: alto costo operativo, insumos especializados y equipo multidisciplinario.
-
-**3. Tecnologia e inversiones**
-- Equipos de alta tecnologia (desde 2007): angiografia avanzada, 3D roadmapping, Expert CT, escaner multicorte 64, resonancia magnetica, mamografia digital, densitometria.
-- 2023-2024: sin informacion publica detallada; el sector ha tenido restricciones presupuestarias.
-
-**4. Programas y servicios nuevos**
-- PAINT (atencion integral nutricional)
-- "Pierde peso, gana vida" (obesidad)
-- Programa de riesgo cardiovascular
-- Estrategia "Corazon a Corazon" (humanizacion)
-- Grupo de apoyo psicologico "GRASPI"
-- Plan de beneficios "Dime por ti y para todos"
-""",
-    }
-
-    key = norm_key(selected_ips)
-    note = QUALITATIVE_NOTES.get(key)
-    if note is None and ("valle" in key and "lili" in key):
-        note = QUALITATIVE_NOTES.get("fundacion valle del lili")
-    if note is None and "dime" in key:
-        note = QUALITATIVE_NOTES.get("dime clinica neurocardiovascular")
-    if note:
-        st.markdown(note)
-    else:
-        st.info("Aun no hay analisis cualitativo para esta IPS.")
-
-
-    section_header("Bloques financieros", "Cuentas usadas y valores por año")
-    explain_box(
-        "Como se calcula",
-        [
-            "Bloques construidos a partir de cuentas contables específicas.",
-            "Valores anuales en millones de COP.",
-        ],
-    )
-    st.caption(f"Fuente: {ips_source}")
-    st.dataframe(blocks_table(selected_ips), use_container_width=True)
-
-    divider()
-    section_header("Estados financieros por cuenta", "IPS seleccionada")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se respetan las cuentas y el orden del Excel.",
-            "Se muestran valores anuales con formato moneda.",
-        ],
-    )
-    df_ips = ips_df[ips_df["EPS_clean"] == selected_ips]
-    if df_ips.empty:
-        st.info("No hay datos para la IPS seleccionada.")
-    else:
-        estado_df, balance_df = split_financial_statements(df_ips)
-
-        cols = ["CUENTA"] + year_cols if "CUENTA" in df_ips.columns else year_cols
-
-        def render_financial_table(title: str, df_view: pd.DataFrame) -> None:
-            st.subheader(title)
-            if df_view.empty:
-                st.info("No hay datos para esta sección.")
-                return
-            view = df_view[cols].copy()
-            for year in year_cols:
-                if year in view.columns:
-                    view[year] = pd.to_numeric(view[year], errors="coerce")
-            st.dataframe(
-                view.style.format({year: fmt_currency for year in year_cols}),
-                use_container_width=True,
-            )
-
-        render_financial_table("Estado de resultados", estado_df)
-        render_financial_table("Balance general", balance_df)
-
-    divider()
-    section_header("Subscores y Score Financiero", "IPS seleccionada")
-    explain_box(
-        "Como se calcula",
-        [
-            "Subscores = promedio de ratios por categoría.",
-            "Score Financiero = promedio ponderado con pesos del sidebar.",
-            "Incluye columna Promedio por score.",
-        ],
-    )
-    score_df = score_table(selected_ips)
-    score_fmt = {str(year): "{:.1f}" for year in year_cols}
-    score_fmt["Promedio"] = "{:.1f}"
-    st.dataframe(score_df.style.format(score_fmt), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Liquidez")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de corto plazo (liquidez).",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    st.dataframe(ratio_table(selected_ips, liquidity_ratios), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Endeudamiento / Solvencia")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de apalancamiento y solvencia.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    st.dataframe(ratio_table(selected_ips, solvency_ratios), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Rentabilidad")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de margen y retorno sobre activos.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    st.dataframe(ratio_table(selected_ips, profitability_ratios), use_container_width=True)
-
-    divider()
-    section_header("Indicadores de Eficiencia / Actividad")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ratios de rotación y eficiencia de costos.",
-            "Se agrega columna Promedio por indicador.",
-        ],
-    )
-    st.dataframe(ratio_table(selected_ips, efficiency_ratios), use_container_width=True)
-
-with tab_cap:
-    section_header("Capacidad instalada", "Fuente: CI_IPS")
-    explain_box(
-        "Como se calcula",
-        [
-            "Fuente: CI_IPS (capacidad instalada por prestador).",
-            "Se agrupa y suma la cantidad por IPS.",
-        ],
-    )
-    if ci_df.empty:
-        st.warning("No se pudo leer CI_IPS.")
-        st.caption(f"Detalle: {ci_source}")
-    else:
-        cols = [str(c) for c in ci_df.columns]
-        ips_col = next((c for c in cols if "prestador" in c.lower()), None)
-        grupo_col = next((c for c in cols if "grupo" in c.lower()), None)
-        cantidad_col = next((c for c in cols if "cantidad" in c.lower()), None)
-
-        if not all([ips_col, cantidad_col]):
-            st.info("No se encontraron columnas necesarias en CI_IPS.")
+        divider()
+        section_header("Estados financieros por cuenta", "IPS seleccionada")
+        explain_box(
+            "Como se calcula",
+            [
+                "Se respetan las cuentas y el orden del Excel.",
+                "Se muestran valores anuales con formato moneda.",
+            ],
+        )
+        df_ips = ips_df[ips_df["EPS_clean"] == selected_ips]
+        if df_ips.empty:
+            st.info("No hay datos para la IPS seleccionada.")
         else:
-            work = ci_df.copy()
-            work["IPS"] = work[ips_col].map(normalize_text)
-            work["Cantidad"] = pd.to_numeric(work[cantidad_col], errors="coerce")
-            work = work.dropna(subset=["Cantidad"])
+            estado_df, balance_df = split_financial_statements(df_ips)
 
-            total_cap = work.groupby("IPS")["Cantidad"].sum().reset_index()
-            total_cap = total_cap.sort_values("Cantidad", ascending=False)
+            cols = ["CUENTA"] + year_cols if "CUENTA" in df_ips.columns else year_cols
 
-            section_header("Detalle por IPS", "Distribucion por grupo de capacidad")
+            def render_financial_table(title: str, df_view: pd.DataFrame) -> None:
+                st.subheader(title)
+                if df_view.empty:
+                    st.info("No hay datos para esta seccion.")
+                    return
+                view = df_view[cols].copy()
+                for year in year_cols:
+                    if year in view.columns:
+                        view[year] = pd.to_numeric(view[year], errors="coerce")
+                st.dataframe(
+                    view.style.format({year: fmt_currency for year in year_cols}),
+                    width='stretch',
+                )
+
+            render_financial_table("Estado de resultados", estado_df)
+            render_financial_table("Balance general", balance_df)
+
+        divider()
+        section_header("Subscores y Score Financiero", "IPS seleccionada")
+        explain_box(
+            "Como se calcula",
+            [
+                "Subscores = promedio de ratios por categoria.",
+                "Score Financiero = promedio ponderado con pesos del sidebar.",
+                "Incluye columna Promedio por score.",
+            ],
+        )
+        score_df = score_table(selected_ips)
+        score_fmt = {str(year): "{:.1f}" for year in year_cols}
+        score_fmt["Promedio"] = "{:.1f}"
+        st.dataframe(score_df.style.format(score_fmt), width='stretch')
+
+        divider()
+        section_header("Indicadores de Liquidez")
+        explain_box(
+            "Como se calcula",
+            [
+                "Ratios de corto plazo (liquidez).",
+                "Se agrega columna Promedio por indicador.",
+            ],
+        )
+        st.dataframe(ratio_table(selected_ips, liquidity_ratios), width='stretch')
+
+        divider()
+        section_header("Indicadores de Endeudamiento / Solvencia")
+        explain_box(
+            "Como se calcula",
+            [
+                "Ratios de apalancamiento y solvencia.",
+                "Se agrega columna Promedio por indicador.",
+            ],
+        )
+        st.dataframe(ratio_table(selected_ips, solvency_ratios), width='stretch')
+
+        divider()
+        section_header("Indicadores de Rentabilidad")
+        explain_box(
+            "Como se calcula",
+            [
+                "Ratios de margen y retorno sobre activos.",
+                "Se agrega columna Promedio por indicador.",
+            ],
+        )
+        st.dataframe(ratio_table(selected_ips, profitability_ratios), width='stretch')
+
+        divider()
+        section_header("Indicadores de Eficiencia / Actividad")
+        explain_box(
+            "Como se calcula",
+            [
+                "Ratios de rotacion y eficiencia de costos.",
+                "Se agrega columna Promedio por indicador.",
+            ],
+        )
+        st.dataframe(ratio_table(selected_ips, efficiency_ratios), width='stretch')
+
+    if ips_view == "Cualitativo":
+        profile = qualitative_profile(selected_ips)
+        if profile is None:
+            section_header("Analisis cualitativo", "Sin ficha registrada")
+            text_card(
+                "Cobertura actual",
+                "Aun no hay ficha cualitativa documentada para esta IPS. Agrega una ficha para habilitar la vista narrativa.",
+            )
+        else:
+            section_header("Analisis cualitativo", profile["title"])
             explain_box(
                 "Como se calcula",
                 [
-                    "Distribuye la capacidad por grupos de servicio dentro de la IPS.",
-                    "Gráfico de barras horizontal por grupo.",
+                    "Resumen narrativo por entidad basado en fuentes referidas del proyecto.",
+                    "No reemplaza analisis legal ni due diligence documental.",
+                    "Se estructura por vinculos, dotacion, cadena de suministro y eventos EPS.",
                 ],
             )
-            ips_list = total_cap["IPS"].tolist()
-            selected_ips = st.selectbox("IPS", ips_list, index=0, key="ips_cap")
-            ips_detail = work[work["IPS"] == selected_ips]
-            if grupo_col and not ips_detail.empty:
-                ips_detail = ips_detail.copy()
-                ips_detail["Grupo"] = ips_detail[grupo_col].map(normalize_text)
-                grp = ips_detail.groupby("Grupo")["Cantidad"].sum().reset_index()
-                fig = px.bar(
-                    grp.sort_values("Cantidad", ascending=False),
-                    x="Cantidad",
-                    y="Grupo",
-                    orientation="h",
-                    title=f"Capacidad por grupo - {selected_ips}",
-                    labels={"Cantidad": "Capacidad", "Grupo": "Grupo"},
+            text_card("Entidad", profile["title"])
+            for title, bullets in profile["sections"]:
+                bullet_card(title, bullets)
+            references = profile.get("references", [])
+            if references:
+                divider()
+                section_header("Documentos de referencia", profile["title"])
+                for ref in references:
+                    label = str(ref.get("label", "Documento"))
+                    url = str(ref.get("url", "")).strip()
+                    if url:
+                        st.markdown(f"- [{label}]({url})")
+            income_mix_2024 = profile.get("income_mix_2024", [])
+            if income_mix_2024:
+                divider()
+                section_header("Composicion de ingresos por cliente", f"{profile['title']} (2024)")
+                pie_df = pd.DataFrame(income_mix_2024)
+                fig = px.pie(
+                    pie_df,
+                    names="Cliente",
+                    values="Participacion",
+                    title="Composicion de ingresos por cliente (2024)",
                 )
-                fig.update_layout(title_x=0.5, title_xanchor="center")
-                fig = style_chart(fig)
-                chart_container(fig)
-            else:
-                st.info("No hay detalle por grupo de capacidad disponible.")
-
-with tab_serv:
-    section_header("Servicios por complejidad", "Fuente: Serv_IPS")
-    explain_box(
-        "Como se calcula",
-        [
-            "Fuente: Serv_IPS (procedimientos por complejidad).",
-            "Se agrupa por IPS y grupo de servicios.",
-        ],
-    )
-    if serv_df.empty:
-        st.warning("No se pudo leer Serv_IPS.")
-        st.caption(f"Detalle: {serv_source}")
-    else:
-        cols = [str(c) for c in serv_df.columns]
-        ips_col = next((c for c in cols if "prestador" in c.lower()), None)
-        comp_col = next((c for c in cols if "complej" in c.lower()), None)
-        group_col = next((c for c in cols if "grse" in c.lower()), None)
-
-        if not all([ips_col, comp_col]):
-            st.info("No se encontraron columnas necesarias para servicios en Serv_IPS.")
-        else:
-            work = serv_df.copy()
-            work["IPS"] = work[ips_col].map(normalize_text)
-            work["Complejidad"] = work[comp_col].map(normalize_text)
-            if group_col:
-                work["Grupo"] = work[group_col].map(normalize_text)
-                group_options = ["Todos"] + sorted(work["Grupo"].dropna().unique().tolist())
-            else:
-                group_options = ["Todos"]
-
-            selected_group = st.selectbox("Grupo de servicios", group_options, index=0)
-            if selected_group != "Todos" and group_col:
-                work = work[work["Grupo"] == selected_group]
-
-            ips_counts = work.groupby("IPS").size().reset_index(name="Procedimientos")
-            ips_counts = ips_counts.sort_values("Procedimientos", ascending=False)
-            default_ips = ips_counts.head(5)["IPS"].tolist()
-            selected_ips = st.multiselect("IPS", ips_counts["IPS"].tolist(), default=default_ips)
-
-            if not selected_ips:
-                st.info("Selecciona al menos una IPS.")
-            else:
-                filtered = work[work["IPS"].isin(selected_ips)]
-                grouped = (
-                    filtered.groupby(["IPS", "Complejidad"]).size().reset_index(name="Procedimientos")
-                )
-                fig = px.bar(
-                    grouped,
-                    x="IPS",
-                    y="Procedimientos",
-                    color="Complejidad",
-                    barmode="group",
-                    title="Procedimientos por complejidad (IPS seleccionadas)",
-                    labels={"IPS": "IPS", "Procedimientos": "Numero de procedimientos"},
+                fig.update_traces(
+                    textposition="inside",
+                    texttemplate="%{label}<br>%{percent}",
+                    hovertemplate="%{label}: %{value:.1f}%<extra></extra>",
+                    sort=False,
                 )
                 fig.update_layout(title_x=0.5, title_xanchor="center")
                 fig = style_chart(fig)
                 chart_container(fig)
 
+            particular_procedure_mix_2024 = profile.get("particular_procedure_mix_2024", [])
+            if particular_procedure_mix_2024:
+                divider()
+                section_header(
+                    "Pacientes particulares por procedimiento",
+                    f"{profile['title']} (2024)",
+                )
+                procedure_df = pd.DataFrame(particular_procedure_mix_2024)
+                fig = px.pie(
+                    procedure_df,
+                    names="Procedimiento",
+                    values="Participacion",
+                    title="Composicion de procedimientos en pacientes particulares (2024)",
+                )
+                fig.update_traces(
+                    textposition="inside",
+                    texttemplate="%{label}<br>%{percent}",
+                    hovertemplate="%{label}: %{value:.1f}%<extra></extra>",
+                    sort=False,
+                )
+                fig.update_layout(title_x=0.5, title_xanchor="center")
+                fig = style_chart(fig)
+                chart_container(fig)
+
+                particular_income_2024 = profile.get("particular_income_2024")
+                if particular_income_2024 is not None:
+                    text_card(
+                        "Ingresos por Particulares (2024)",
+                        f"COP {particular_income_2024:,.0f}".replace(",", "."),
+                    )
+
+        divider()
+        render_services_matrix(selected_ips=selected_ips)
 with tab_tarifas:
     section_header("Tarifas IPS", "Fuente: TarifasCompetencia")
     explain_box(
@@ -1048,6 +1316,99 @@ with tab_tarifas:
             "No se usa para calculos del modelo.",
         ],
     )
+    section_header("Tarifas Bogota + Incremento Cali", "Fuente: Tarifas_Escenarios")
+    explain_box(
+        "Como se calcula",
+        [
+            "Tabla resumida con columnas clave de escenarios.",
+            "No se usa para calculos del modelo.",
+        ],
+    )
+    if tarifas_esc_df.empty:
+        st.warning("No se pudo leer la hoja Tarifas_Escenarios.")
+        st.caption(f"Detalle: {tarifas_esc_source}")
+    else:
+        cols = [str(c) for c in tarifas_esc_df.columns]
+        col_escenario = (
+            find_col(cols, ["escenario"])
+            or find_col(cols, ["scenario"])
+            or find_col(cols, ["tipo"])
+        )
+        col_tarifa_prom = (
+            find_col(cols, ["tarifas", "promedio"])
+            or find_col(cols, ["tarifa", "promedio"])
+        )
+        col_inc_cali = find_col(cols, ["incremento", "cali"])
+        col_tarifa_inc = (
+            find_col(cols, ["tarifas", "con", "incremento"])
+            or find_col(cols, ["tarifa", "con", "incremento"])
+        )
+        missing = [
+            name
+            for name, col in [
+                ("TARIFAS PROMEDIO", col_tarifa_prom),
+                ("INCREMENTO CALI", col_inc_cali),
+                ("TARIFAS CON INCREMENTO", col_tarifa_inc),
+            ]
+            if col is None
+        ]
+        if missing:
+            st.warning("No se encontraron todas las columnas esperadas en Tarifas_Escenarios.")
+            st.caption(f"Faltantes: {', '.join(missing)}")
+            st.caption(f"Columnas disponibles: {cols}")
+        else:
+            esc_view = tarifas_esc_df.copy()
+            if col_escenario:
+                esc_norm = esc_view[col_escenario].astype(str).map(normalize_text)
+                mask_esc_3 = esc_norm.str.contains(r"\b3\b", regex=True) | (
+                    esc_norm.str.contains("incremento", na=False)
+                    & esc_norm.str.contains("cali", na=False)
+                )
+                esc_view = esc_view[mask_esc_3]
+            else:
+                inc_series = pd.to_numeric(esc_view[col_inc_cali], errors="coerce")
+                tarifa_inc_series = pd.to_numeric(esc_view[col_tarifa_inc], errors="coerce")
+                esc_view = esc_view[inc_series.notna() | tarifa_inc_series.notna()]
+
+            if esc_view.empty:
+                st.warning("No se encontraron filas del escenario 3 en Tarifas_Escenarios.")
+                st.caption("Revisa columna de escenario o datos de incremento.")
+            else:
+                small = esc_view[[col_tarifa_prom, col_inc_cali, col_tarifa_inc]].copy()
+                small = small.rename(
+                    columns={
+                        col_tarifa_prom: "TARIFAS PROMEDIO",
+                        col_inc_cali: "INCREMENTO CALI",
+                        col_tarifa_inc: "TARIFAS CON INCREMENTO",
+                    }
+                )
+                small["TARIFAS PROMEDIO"] = pd.to_numeric(
+                    small["TARIFAS PROMEDIO"], errors="coerce"
+                )
+                small["INCREMENTO CALI"] = pd.to_numeric(
+                    small["INCREMENTO CALI"], errors="coerce"
+                )
+                small["TARIFAS CON INCREMENTO"] = pd.to_numeric(
+                    small["TARIFAS CON INCREMENTO"], errors="coerce"
+                )
+                st.dataframe(
+                    small.style.format(
+                        {
+                            "TARIFAS PROMEDIO": lambda v: "" if pd.isna(v) else fmt_currency(float(v)),
+                            "INCREMENTO CALI": lambda v: (
+                                ""
+                                if pd.isna(v)
+                                else f"{(v / 100 if v > 1 else v):.2%}"
+                            ),
+                            "TARIFAS CON INCREMENTO": lambda v: (
+                                "" if pd.isna(v) else fmt_currency(float(v))
+                            ),
+                        }
+                    ),
+                    width='stretch',
+                )
+
+    divider()
     if tarifas_comp_df.empty:
         st.warning("No se pudo leer la hoja TarifasCompetencia.")
         st.caption(f"Detalle: {tarifas_comp_source}")
@@ -1056,12 +1417,32 @@ with tab_tarifas:
         money_cols = [
             c
             for c in view.columns
-            if any(token in normalize_text(c) for token in ["tarifa", "precio", "valor", "venta", "costo"])
-        ]
-        if money_cols:
-            st.dataframe(
-                view.style.format({col: fmt_currency for col in money_cols}),
-                use_container_width=True,
+            if any(
+                normalize_text(token) in normalize_text(c)
+                for token in ["tarifa", "precio", "valor", "venta", "costo"]
             )
-        else:
-            st.dataframe(view, use_container_width=True)
+        ]
+        # Avoid Arrow type errors on mixed columns (e.g., numeric + 'No manejan').
+        safe_view = view.copy()
+
+        def safe_text(value: object) -> str:
+            if pd.isna(value):
+                return ""
+            return str(value)
+
+        def safe_money(value: object) -> str:
+            if pd.isna(value):
+                return ""
+            num = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+            if pd.notna(num):
+                return fmt_currency(float(num))
+            return str(value)
+
+        for col in safe_view.columns:
+            if col in money_cols:
+                safe_view[col] = safe_view[col].map(safe_money)
+            else:
+                safe_view[col] = safe_view[col].map(safe_text)
+
+        st.dataframe(safe_view, width='stretch')
+

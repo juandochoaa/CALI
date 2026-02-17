@@ -10,14 +10,39 @@ RAW_DIR = ROOT_DIR / "data" / "raw"
 CALI_ANALISIS_FILE = "Cali ANALISIS.xlsx"
 
 
+def _sheet_key(name: str) -> str:
+    return "".join(ch for ch in str(name).lower() if ch not in {" ", "_"})
+
+
+def _resolve_sheet_name(path: Path, preferred_sheet: str | int | None) -> str | int | None:
+    xls = pd.ExcelFile(path)
+    names = xls.sheet_names
+    if preferred_sheet is None:
+        return 0
+    if isinstance(preferred_sheet, int):
+        return preferred_sheet if 0 <= preferred_sheet < len(names) else 0
+    if preferred_sheet in names:
+        return preferred_sheet
+    candidates = [
+        preferred_sheet,
+        preferred_sheet.replace(" ", "_"),
+        preferred_sheet.replace("_", " "),
+    ]
+    for candidate in candidates:
+        if candidate in names:
+            return candidate
+    preferred_key = _sheet_key(preferred_sheet)
+    for name in names:
+        if _sheet_key(name) == preferred_key:
+            return name
+    return None
+
+
 def _read_excel(path: Path, preferred_sheet: str | int | None = None) -> Tuple[pd.DataFrame, str | int]:
     xls = pd.ExcelFile(path)
-    if preferred_sheet is None:
-        sheet = 0
-    elif isinstance(preferred_sheet, str) and preferred_sheet in xls.sheet_names:
-        sheet = preferred_sheet
-    else:
-        sheet = 0
+    sheet = _resolve_sheet_name(path, preferred_sheet)
+    if sheet is None:
+        sheet = 0 if xls.sheet_names else 0
     df = xls.parse(sheet)
     return df, sheet
 
@@ -92,7 +117,7 @@ def load_cifras_eps_raw(sheet: str, header: int | None = None) -> Tuple[pd.DataF
         return pd.DataFrame(), f"Error leyendo {path.name}: {exc}"
 
 
-def load_eps_financials(sheet: str = "EPS EEFF") -> Tuple[pd.DataFrame, str]:
+def load_eps_financials(sheet: str = "EPS_EEFF") -> Tuple[pd.DataFrame, str]:
     filename = CALI_ANALISIS_FILE
     path = RAW_DIR / filename
     if not path.exists():
@@ -102,7 +127,14 @@ def load_eps_financials(sheet: str = "EPS EEFF") -> Tuple[pd.DataFrame, str]:
     if not path.exists():
         return pd.DataFrame(), "Archivo no encontrado"
     try:
-        df_raw = pd.read_excel(path, sheet_name=sheet, header=None)
+        sheet_used = _resolve_sheet_name(path, sheet)
+        if sheet_used is None:
+            xls = pd.ExcelFile(path)
+            return pd.DataFrame(), (
+                f"Hoja no encontrada: {sheet}. Hojas disponibles: {', '.join(xls.sheet_names)}"
+            )
+
+        df_raw = pd.read_excel(path, sheet_name=sheet_used, header=None)
 
         def clean_cell(value: object) -> str:
             if value is None:
@@ -120,7 +152,7 @@ def load_eps_financials(sheet: str = "EPS EEFF") -> Tuple[pd.DataFrame, str]:
         if header_row is None:
             header_row = 0
 
-        df = pd.read_excel(path, sheet_name=sheet, header=header_row)
+        df = pd.read_excel(path, sheet_name=sheet_used, header=header_row)
         df.columns = [str(c).strip() for c in df.columns]
 
         def normalize_text(series: pd.Series) -> pd.Series:
@@ -142,7 +174,7 @@ def load_eps_financials(sheet: str = "EPS EEFF") -> Tuple[pd.DataFrame, str]:
         # Trim all string cells to remove indentation
         for col in df.select_dtypes(include="object").columns:
             df[col] = df[col].astype(str).str.strip()
-        return df, f"Excel: {path.name} (hoja {sheet})"
+        return df, f"Excel: {path.name} (hoja {sheet_used})"
     except Exception as exc:
         return pd.DataFrame(), f"Error leyendo {path.name}: {exc}"
 
