@@ -25,18 +25,67 @@ from dashboards.ui import (
     section_header,
     style_chart,
 )
-from src.models.eps_montecarlo import (
-    EPS_OBJ_DEFAULT,
-    PROBABILITY_COLUMNS,
-    build_eps_historical_compliance,
-    build_composite_ranking,
-    compute_cxp_revenue_score,
-    build_income_statement_view,
-    compute_market_share_valle,
-    compute_reclamos_score,
-    impute_missing_probabilities,
-    run_eps_montecarlo,
-    score_risk_percentiles,
+
+try:
+    from src.models import eps_montecarlo as eps_montecarlo_model
+except Exception as exc:  # pragma: no cover - safety guard for deployment mismatches
+    st.error(f"No se pudo cargar el modulo de modelo EPS Monte Carlo. Detalle: {exc}")
+    st.stop()
+
+EPS_OBJ_DEFAULT = list(getattr(eps_montecarlo_model, "EPS_OBJ_DEFAULT", []))
+PROBABILITY_COLUMNS = list(getattr(eps_montecarlo_model, "PROBABILITY_COLUMNS", []))
+
+run_eps_montecarlo = eps_montecarlo_model.run_eps_montecarlo
+compute_market_share_valle = eps_montecarlo_model.compute_market_share_valle
+compute_reclamos_score = eps_montecarlo_model.compute_reclamos_score
+impute_missing_probabilities = eps_montecarlo_model.impute_missing_probabilities
+score_risk_percentiles = eps_montecarlo_model.score_risk_percentiles
+build_composite_ranking = eps_montecarlo_model.build_composite_ranking
+build_income_statement_view = eps_montecarlo_model.build_income_statement_view
+
+
+def _fallback_compute_cxp_revenue_score(
+    eps_eeff_df: pd.DataFrame,
+    eps_obj: list[str] | None = None,
+) -> pd.DataFrame:
+    universe = list(eps_obj or EPS_OBJ_DEFAULT)
+    out = pd.DataFrame({"EPS": universe})
+    out["CxP_Comercial"] = np.nan
+    out["Ingresos"] = np.nan
+    out["CxP_over_REV"] = np.nan
+    out["Score_CxP_REV"] = 0.0
+    out["cxp_rev_imputado"] = True
+    out["motivo_imputacion_cxp_rev"] = "funcion_no_disponible_en_modelo"
+    return out
+
+
+def _fallback_build_eps_historical_compliance(
+    base_eps: pd.DataFrame,
+    eps_name: str,
+) -> pd.DataFrame:
+    return pd.DataFrame(
+        columns=[
+            "Año",
+            "CM_ratio",
+            "PA_ratio",
+            "RI_ratio",
+            "Cumple_CM",
+            "Cumple_PA",
+            "Cumple_RI",
+            "Cumple_3_de_3",
+        ]
+    )
+
+
+compute_cxp_revenue_score = getattr(
+    eps_montecarlo_model,
+    "compute_cxp_revenue_score",
+    _fallback_compute_cxp_revenue_score,
+)
+build_eps_historical_compliance = getattr(
+    eps_montecarlo_model,
+    "build_eps_historical_compliance",
+    _fallback_build_eps_historical_compliance,
 )
 
 st.set_page_config(page_title="Clientes", layout="wide")
