@@ -1,30 +1,32 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import base64
 from html import escape
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 _THEME_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Newsreader:wght@400;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;500;600;700;800&display=swap');
 
 :root {
-  --bg-1: #f7f2ea;
-  --bg-2: #f0e6d8;
-  --ink: #0a1414;
-  --ink-soft: #243737;
-  --accent: #c25416;
-  --accent-2: #0f6a62;
-  --panel: #fffdf8;
-  --panel-2: rgba(255, 255, 255, 0.92);
-  --stroke: rgba(11, 31, 31, 0.22);
-  --grid: rgba(11, 31, 31, 0.14);
-  --shadow: 0 16px 36px rgba(11, 31, 31, 0.12);
+  --bg-1: #ffffff;
+  --bg-2: #f7f9fc;
+  --ink: #0b1f3b;
+  --ink-soft: #345072;
+  --accent-blue: #0067b8;
+  --accent-red: #d62839;
+  --panel: #ffffff;
+  --panel-2: rgba(255, 255, 255, 0.98);
+  --stroke: rgba(0, 103, 184, 0.22);
+  --grid: rgba(11, 31, 59, 0.10);
+  --shadow: 0 10px 24px rgba(11, 31, 59, 0.10);
 }
 
 html, body, [class*="css"] {
-  font-family: 'Space Grotesk', sans-serif;
+  font-family: 'Nunito', sans-serif;
   color: var(--ink);
 }
 
@@ -44,19 +46,43 @@ html, body, [class*="css"] {
 
 .stApp {
   background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(217, 107, 43, 0.18), transparent 60%),
-    radial-gradient(900px 500px at 100% 0%, rgba(46, 138, 124, 0.16), transparent 55%),
+    radial-gradient(1100px 540px at 10% -10%, rgba(0, 103, 184, 0.08), transparent 60%),
+    radial-gradient(800px 440px at 100% 0%, rgba(214, 40, 57, 0.08), transparent 55%),
     linear-gradient(180deg, var(--bg-1), var(--bg-2));
 }
 
 h1, h2, h3, h4 {
-  font-family: 'Newsreader', serif;
+  font-family: 'Constantia', 'Times New Roman', serif;
   letter-spacing: -0.02em;
 }
 
 section[data-testid="stSidebar"] {
-  background: linear-gradient(180deg, #efe3d0 0%, #e6d6c0 100%);
-  border-right: 1px solid rgba(11, 31, 31, 0.28);
+  background: #ffffff;
+  border-right: 1px solid rgba(0, 103, 184, 0.22);
+}
+
+.sidebar-brand {
+  padding: 8px 0 14px 0;
+  margin-bottom: 10px;
+  border-bottom: 2px solid rgba(0, 103, 184, 0.18);
+}
+
+.sidebar-brand img {
+  width: 180px;
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.sidebar-brand-fallback {
+  font-family: 'Constantia', 'Times New Roman', serif;
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--accent-blue);
+  letter-spacing: 0.02em;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid rgba(0, 103, 184, 0.18);
 }
 
 .hero {
@@ -72,13 +98,13 @@ section[data-testid="stSidebar"] {
   text-transform: uppercase;
   font-size: 12px;
   letter-spacing: 0.22em;
-  color: var(--accent-2);
+  color: var(--accent-blue);
   margin-bottom: 6px;
 }
 
 .hero .title {
   font-size: 36px;
-  font-weight: 600;
+  font-weight: 700;
   margin-bottom: 8px;
 }
 
@@ -90,12 +116,12 @@ section[data-testid="stSidebar"] {
 
 .section-title {
   font-size: 20px;
-  font-weight: 600;
+  font-weight: 700;
   margin: 12px 0 6px 0;
 }
 
 .section-caption {
-  color: #2e3f3f;
+  color: var(--ink-soft);
   font-size: 13px;
   margin-bottom: 10px;
 }
@@ -110,7 +136,7 @@ section[data-testid="stSidebar"] {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.2em;
-  color: var(--accent-2);
+  color: var(--accent-blue);
   margin-bottom: 6px;
 }
 
@@ -119,7 +145,7 @@ div[data-testid="stMetric"] {
   border: 1px solid var(--stroke);
   padding: 14px 16px;
   border-radius: 18px;
-  box-shadow: 0 10px 24px rgba(11, 31, 31, 0.12);
+  box-shadow: var(--shadow);
 }
 
 div[data-testid="stMetric"] > label {
@@ -134,7 +160,7 @@ div[data-testid="stMetric"] > label {
   border: 1px solid var(--stroke);
   border-radius: 18px;
   padding: 12px 12px 6px 12px;
-  box-shadow: 0 12px 26px rgba(11, 31, 31, 0.1);
+  box-shadow: var(--shadow);
 }
 
 .text-card {
@@ -142,7 +168,7 @@ div[data-testid="stMetric"] > label {
   border: 1px solid var(--stroke);
   border-radius: 16px;
   padding: 14px 16px;
-  box-shadow: 0 10px 22px rgba(11, 31, 31, 0.08);
+  box-shadow: 0 8px 20px rgba(11, 31, 59, 0.08);
   margin-bottom: 12px;
 }
 
@@ -150,7 +176,7 @@ div[data-testid="stMetric"] > label {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.16em;
-  color: var(--accent-2);
+  color: var(--accent-blue);
   margin-bottom: 6px;
 }
 
@@ -170,7 +196,7 @@ div[data-testid="stMetric"] > label {
 }
 
 .takeaway {
-  background: linear-gradient(120deg, rgba(15, 106, 98, 0.12), rgba(194, 84, 22, 0.12));
+  background: linear-gradient(120deg, rgba(0, 103, 184, 0.09), rgba(214, 40, 57, 0.09));
   border: 1px solid var(--stroke);
   border-radius: 16px;
   padding: 14px 16px;
@@ -195,7 +221,7 @@ div[data-testid="stMetric"] > label {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.16em;
-  color: var(--accent-2);
+  color: var(--accent-blue);
   margin: 4px 0 4px 0;
 }
 
@@ -209,8 +235,47 @@ div[data-testid="stRadio"] > div {
 """
 
 
+def _logo_data_uri() -> str | None:
+    root = Path(__file__).resolve().parents[1]
+    candidates = [
+        root / "data" / "raw" / "icblogonuevoformal-2.png",
+        root / "data" / "raw" / "icb_logo.png",
+        root / "dashboards" / "assets" / "icb_logo.png",
+        root / "dashboards" / "assets" / "icb_logo.svg",
+    ]
+    for logo_path in candidates:
+        if logo_path.exists():
+            raw = logo_path.read_bytes()
+            suffix = logo_path.suffix.lower()
+            if suffix == ".svg":
+                mime = "image/svg+xml"
+            elif suffix == ".png":
+                mime = "image/png"
+            elif suffix in {".jpg", ".jpeg"}:
+                mime = "image/jpeg"
+            elif suffix == ".webp":
+                mime = "image/webp"
+            else:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            return f"data:{mime};base64,{encoded}"
+    return None
+
+
+def _render_sidebar_brand() -> None:
+    logo_uri = _logo_data_uri()
+    if logo_uri:
+        st.sidebar.markdown(
+            f"<div class='sidebar-brand'><img src='{logo_uri}' alt='ICB logo' /></div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.sidebar.markdown("<div class='sidebar-brand-fallback'>ICB</div>", unsafe_allow_html=True)
+
+
 def apply_theme() -> None:
     st.markdown(_THEME_CSS, unsafe_allow_html=True)
+    _render_sidebar_brand()
 
 
 def page_header(title: str, subtitle: str | None = None, kicker: str | None = None) -> None:
@@ -239,23 +304,23 @@ def style_chart(fig):
         template="simple_white",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Space Grotesk", color="#000000"),
+        font=dict(family="Nunito", color="#0b1f3b"),
         margin=dict(l=18, r=18, t=46, b=18),
-        title_font=dict(size=16, family="Newsreader"),
+        title_font=dict(size=16, family="Constantia"),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        colorway=["#0f6a62", "#c25416", "#2f4858", "#7a4e8a", "#4c7a7a"],
+        colorway=["#0067b8", "#d62839", "#0b1f3b", "#2a6f97", "#a4161a"],
     )
     fig.update_xaxes(
         showgrid=True,
-        gridcolor="rgba(15,45,46,0.08)",
-        tickfont=dict(color="#000000"),
-        title_font=dict(color="#000000"),
+        gridcolor="rgba(11,31,59,0.08)",
+        tickfont=dict(color="#0b1f3b"),
+        title_font=dict(color="#0b1f3b"),
     )
     fig.update_yaxes(
         showgrid=True,
-        gridcolor="rgba(15,45,46,0.08)",
-        tickfont=dict(color="#000000"),
-        title_font=dict(color="#000000"),
+        gridcolor="rgba(11,31,59,0.08)",
+        tickfont=dict(color="#0b1f3b"),
+        title_font=dict(color="#0b1f3b"),
     )
     return fig
 
@@ -312,7 +377,7 @@ def takeaway_box(title: str, body: str) -> None:
         (
             "<div class='takeaway'>"
             f"<div class='takeaway-title'>{escape(title)}</div>"
-            f"<div class='takeaway-body'>{escape(body).replace('\n', '<br>')}</div>"
+            f"<div class='takeaway-body'>{escape(body).replace('\\n', '<br>')}</div>"
             "</div>"
         ),
         unsafe_allow_html=True,

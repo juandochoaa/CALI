@@ -332,10 +332,22 @@ def _filter_tarifas_by_target(
 
 def _normalize_tarifa_weights(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
+    if "PacientesValle" not in out.columns:
+        out["PacientesValle"] = np.nan
+    if "RatioIntervenciones" not in out.columns:
+        out["RatioIntervenciones"] = np.nan
+    if "IntervencionesRaw" not in out.columns:
+        out["IntervencionesRaw"] = np.nan
+
     out["Pacientes"] = pd.to_numeric(out["Pacientes"], errors="coerce")
+    out["PacientesValle"] = pd.to_numeric(out["PacientesValle"], errors="coerce")
+
+    total_pac_valle = out["PacientesValle"].sum(min_count=1)
     total_pac = out["Pacientes"].sum(min_count=1)
 
-    if pd.notna(total_pac) and total_pac > 0:
+    if pd.notna(total_pac_valle) and total_pac_valle > 0:
+        out["PctPacientes"] = out["PacientesValle"] / total_pac_valle
+    elif pd.notna(total_pac) and total_pac > 0:
         out["PctPacientes"] = out["Pacientes"] / total_pac
     else:
         pct = pd.to_numeric(out.get("PctPacientes"), errors="coerce")
@@ -348,13 +360,44 @@ def _normalize_tarifa_weights(df: pd.DataFrame) -> pd.DataFrame:
             out["PctPacientes"] = np.nan
         out["Pacientes"] = out["PctPacientes"]
 
-    out["PctIntervenciones"] = pd.to_numeric(out["PctIntervenciones"], errors="coerce")
-    missing_interv = out["PctIntervenciones"].isna()
-    if missing_interv.any():
-        out.loc[missing_interv, "PctIntervenciones"] = out.loc[
-            missing_interv, "ServicioTarifa"
-        ].map(lambda x: map_interv_pct(x, INTERV_PCT_MAP))
+    out["RatioIntervenciones"] = pd.to_numeric(
+        out["RatioIntervenciones"], errors="coerce"
+    )
+    inter_raw = pd.to_numeric(out["IntervencionesRaw"], errors="coerce")
+    pac_valle = pd.to_numeric(out["PacientesValle"], errors="coerce")
+    ratio_fallback = np.divide(
+        inter_raw.to_numpy(dtype=float),
+        pac_valle.to_numpy(dtype=float),
+        out=np.full(len(out), np.nan, dtype=float),
+        where=(pac_valle.to_numpy(dtype=float) > 0),
+    )
+    missing_ratio = out["RatioIntervenciones"].isna()
+    if missing_ratio.any():
+        out.loc[missing_ratio, "RatioIntervenciones"] = ratio_fallback[missing_ratio]
     return out
+
+
+def _parse_percent_value(value: object) -> float:
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip()
+    if not text:
+        return np.nan
+    text = text.replace("%", "").replace(" ", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        out = float(text)
+    except Exception:
+        return np.nan
+    if out > 1:
+        out = out / 100.0
+    return float(out)
 
 
 def _build_tarifa_scenario_group(
@@ -362,8 +405,10 @@ def _build_tarifa_scenario_group(
     servicio_col: str,
     tarifa_col: str,
     pacientes_col: str | None,
-    incremento_col: str | None,
-    tarifa_inc_col: str | None,
+    pct_pacientes_col: str | None,
+    pacientes_valle_col: str | None,
+    ratio_interv_col: str | None,
+    intervenciones_col: str | None,
 ) -> pd.DataFrame:
     if work.empty:
         return pd.DataFrame()
@@ -377,11 +422,16 @@ def _build_tarifa_scenario_group(
     else:
         local["__pacientes_fallback__"] = 1.0
         pacientes_col = "__pacientes_fallback__"
-
-    if incremento_col:
-        local[incremento_col] = pd.to_numeric(local[incremento_col], errors="coerce")
-    if tarifa_inc_col:
-        local[tarifa_inc_col] = pd.to_numeric(local[tarifa_inc_col], errors="coerce")
+    if pct_pacientes_col:
+        local[pct_pacientes_col] = local[pct_pacientes_col].map(_parse_percent_value)
+    if pacientes_valle_col:
+        local[pacientes_valle_col] = pd.to_numeric(
+            local[pacientes_valle_col], errors="coerce"
+        )
+    if ratio_interv_col:
+        local[ratio_interv_col] = local[ratio_interv_col].map(_parse_percent_value)
+    if intervenciones_col:
+        local[intervenciones_col] = pd.to_numeric(local[intervenciones_col], errors="coerce")
 
     def weighted_avg(group: pd.DataFrame, value_col: str | None) -> float:
         if not value_col:
@@ -402,8 +452,18 @@ def _build_tarifa_scenario_group(
                     "Pacientes": pd.to_numeric(g[pacientes_col], errors="coerce").sum(
                         min_count=1
                     ),
-                    "IncrementoRaw": weighted_avg(g, incremento_col),
-                    "TarifaConIncrementoRaw": weighted_avg(g, tarifa_inc_col),
+                    "PctPacientesRaw": weighted_avg(g, pct_pacientes_col),
+                    "PacientesValleRaw": pd.to_numeric(
+                        g[pacientes_valle_col], errors="coerce"
+                    ).sum(min_count=1)
+                    if pacientes_valle_col
+                    else np.nan,
+                    "RatioIntervencionesRaw": weighted_avg(g, ratio_interv_col),
+                    "IntervencionesRaw": pd.to_numeric(g[intervenciones_col], errors="coerce").sum(
+                        min_count=1
+                    )
+                    if intervenciones_col
+                    else np.nan,
                 }
             )
         )
@@ -411,18 +471,24 @@ def _build_tarifa_scenario_group(
         .rename(columns={servicio_col: "ServicioTarifa"})
     )
 
-    inc = grouped["IncrementoRaw"].fillna(0)
-    inc = inc.apply(lambda v: v / 100 if pd.notna(v) and v > 1 else v)
-    grouped["INCREMENTO CALI"] = inc
-    grouped["TARIFAS CON INCREMENTO"] = grouped["TarifaConIncrementoRaw"]
-    grouped["TARIFAS CON INCREMENTO"] = grouped["TARIFAS CON INCREMENTO"].where(
-        grouped["TARIFAS CON INCREMENTO"].notna(),
-        grouped["TarifaBase"],
+    grouped["TarifaPromedio"] = grouped["TarifaBase"]
+    grouped["PctPacientes"] = pd.to_numeric(grouped["PctPacientesRaw"], errors="coerce")
+    grouped["PacientesValle"] = pd.to_numeric(grouped["PacientesValleRaw"], errors="coerce")
+    grouped["RatioIntervenciones"] = pd.to_numeric(
+        grouped["RatioIntervencionesRaw"], errors="coerce"
     )
-    grouped["TarifaPromedio"] = grouped["TARIFAS CON INCREMENTO"]
-    grouped["PctIntervenciones"] = grouped["ServicioTarifa"].map(
-        lambda x: map_interv_pct(x, INTERV_PCT_MAP)
+    grouped["IntervencionesRaw"] = pd.to_numeric(grouped["IntervencionesRaw"], errors="coerce")
+
+    ratio_fallback = np.divide(
+        grouped["IntervencionesRaw"].to_numpy(dtype=float),
+        grouped["PacientesValle"].to_numpy(dtype=float),
+        out=np.full(len(grouped), np.nan, dtype=float),
+        where=(grouped["PacientesValle"].to_numpy(dtype=float) > 0),
     )
+    missing_ratio = grouped["RatioIntervenciones"].isna()
+    if missing_ratio.any():
+        grouped.loc[missing_ratio, "RatioIntervenciones"] = ratio_fallback[missing_ratio]
+
     grouped["OrigenServicio"] = "Original"
     grouped = _normalize_tarifa_weights(grouped)
     return grouped
@@ -508,28 +574,51 @@ def parse_tarifas_escenarios(
     scenario_col = find_col_any(cols, [["escenario"], ["scenario"], ["tipo"]])
     sede_col = find_col_any(cols, [["ciudad"], ["sede"], ["departamento"]])
     servicio_col = find_col_any(cols, [["servicio"]])
-    tarifa_col = find_col_any(
+    tarifa_col = next((c for c in cols if normalize_text(c) == "tarifas"), None)
+    if not tarifa_col:
+        tarifa_col = find_col_any(
+            cols,
+            [
+                ["tarifas", "promedio", "icb"],
+                ["tarifa", "promedio", "icb"],
+                ["tarifas", "promedio"],
+                ["tarifa", "promedio"],
+                ["tarifas"],
+                ["tarifa"],
+                ["precio"],
+                ["valor"],
+            ],
+        )
+    pacientes_valle_col = find_col_any(
         cols,
         [
-            ["tarifas", "promedio", "icb"],
-            ["tarifa", "promedio", "icb"],
-            ["tarifas", "promedio"],
-            ["tarifa", "promedio"],
-            ["tarifas"],
-            ["tarifa"],
-            ["precio"],
-            ["valor"],
+            ["pacientes", "valle"],
+            ["pacientes", "valle", "cauca"],
         ],
     )
-    pacientes_col = find_col_any(cols, [["pacientes"], ["paciente"]])
-    incremento_col = find_col_any(cols, [["incremento", "cali"], ["incremento"]])
-    tarifa_inc_col = find_col_any(
+    pacientes_col = next((c for c in cols if normalize_text(c) == "pacientes"), None)
+    if not pacientes_col:
+        pacientes_col = find_col_any(cols, [["pacientes"], ["paciente"]])
+    if pacientes_col and pacientes_valle_col and pacientes_col == pacientes_valle_col:
+        pacientes_col = None
+    pct_pacientes_col = find_col_any(
         cols,
         [
-            ["tarifas", "con", "incremento"],
-            ["tarifa", "con", "incremento"],
+            ["%", "pacientes"],
+            ["pct", "pacientes"],
+            ["porcentaje", "pacientes"],
         ],
     )
+    ratio_interv_col = find_col_any(
+        cols,
+        [
+            ["ratio", "intervenciones"],
+            ["ratio", "intervencion"],
+        ],
+    )
+    intervenciones_col = find_col_any(cols, [["intervenciones"]])
+    if ratio_interv_col and intervenciones_col and ratio_interv_col == intervenciones_col:
+        intervenciones_col = None
 
     if not servicio_col or not tarifa_col:
         return pd.DataFrame()
@@ -544,8 +633,10 @@ def parse_tarifas_escenarios(
         servicio_col=servicio_col,
         tarifa_col=tarifa_col,
         pacientes_col=pacientes_col,
-        incremento_col=incremento_col,
-        tarifa_inc_col=tarifa_inc_col,
+        pct_pacientes_col=pct_pacientes_col,
+        pacientes_valle_col=pacientes_valle_col,
+        ratio_interv_col=ratio_interv_col,
+        intervenciones_col=intervenciones_col,
     )
 
     if target == 1:
@@ -556,8 +647,10 @@ def parse_tarifas_escenarios(
                 servicio_col=servicio_col,
                 tarifa_col=tarifa_col,
                 pacientes_col=pacientes_col,
-                incremento_col=incremento_col,
-                tarifa_inc_col=tarifa_inc_col,
+                pct_pacientes_col=pct_pacientes_col,
+                pacientes_valle_col=pacientes_valle_col,
+                ratio_interv_col=ratio_interv_col,
+                intervenciones_col=intervenciones_col,
             )
             grouped = _complete_scenario_1_from_2(grouped, grouped_s2)
         else:
@@ -575,9 +668,9 @@ def parse_tarifas_escenarios(
             "TarifaPromedio",
             "Pacientes",
             "PctPacientes",
-            "PctIntervenciones",
-            "INCREMENTO CALI",
-            "TARIFAS CON INCREMENTO",
+            "PacientesValle",
+            "RatioIntervenciones",
+            "IntervencionesRaw",
             "OrigenServicio",
         ]
     ]
@@ -1834,17 +1927,17 @@ with tab_eeff:
                         + ", ".join(missing_accounts)
                     )
 
-                    salary_source_label = str(salary_comp.get("source_label", th_source))
-                    section_header("Comparacion salarial Cali vs nosotros", f"Fuente: {salary_source_label}")
-                    salary_table = salary_comp.get("table", pd.DataFrame())
-                    salary_warnings = salary_comp.get("warnings", [])
-                    for warning_msg in salary_warnings:
-                        st.warning(str(warning_msg))
-                    if salary_source_label != "Hoja TH":
-                        st.info(
-                            "Se esta usando la tabla salarial de referencia para calcular el aumento promedio "
-                            "de Nomina Asistencial."
-                        )
+                salary_source_label = str(salary_comp.get("source_label", th_source))
+                section_header("Comparacion salarial Cali vs nosotros", f"Fuente: {salary_source_label}")
+                salary_table = salary_comp.get("table", pd.DataFrame())
+                salary_warnings = salary_comp.get("warnings", [])
+                for warning_msg in salary_warnings:
+                    st.warning(str(warning_msg))
+                if salary_source_label != "Hoja TH":
+                    st.info(
+                        "Se esta usando la tabla salarial de referencia para calcular el aumento promedio "
+                        "de Nomina Asistencial."
+                    )
 
                 avg_salary_increase = pd.to_numeric(
                     salary_comp.get("mean_increase"), errors="coerce"

@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -14,10 +15,12 @@ from dashboards.data_loader import load_cifras_eps, load_cifras_eps_raw
 from dashboards.ui import (
     apply_theme,
     bullet_card,
+    chart_container,
     explain_box,
     insight_cards,
     page_header,
     section_header,
+    style_chart,
     subsection_selector,
     takeaway_box,
     text_card,
@@ -158,6 +161,96 @@ def _render_target_population(
         st.caption(" | ".join(source_parts))
 
 
+def _build_barrera_salud_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Departamento": ["Santander", "Valle del Cauca"],
+            2019: [3.8, 2.4],
+            2020: [1.3, 1.2],
+            2021: [1.0, 1.7],
+            2022: [0.9, 1.6],
+            2023: [1.3, 0.7],
+            2024: [0.5, 1.2],
+        }
+    )
+
+
+def _render_barrera_salud_section() -> None:
+    section_header("Barrera en salud", "Comparativo Santander vs Valle del Cauca")
+    explain_box(
+        "Fuente y lectura",
+        [
+            "Tomado del Indice de pobreza multidimensional del DANE con datos de la Encuesta de Calidad de Vida.",
+            "Indica el % de poblacion u hogares con barreras para acceder a servicios de salud.",
+            "Entre mas alto el valor, mas personas reportan dificultades para acceder.",
+        ],
+    )
+
+    barrera_df = _build_barrera_salud_df()
+    year_cols = [c for c in barrera_df.columns if isinstance(c, int)]
+
+    st.dataframe(
+        barrera_df.style.format({y: "{:.1f}%" for y in year_cols}),
+        width="stretch",
+        hide_index=True,
+    )
+
+    long_df = barrera_df.melt(
+        id_vars=["Departamento"],
+        value_vars=year_cols,
+        var_name="Año",
+        value_name="BarreraSaludPct",
+    )
+    long_df["Año"] = pd.to_numeric(long_df["Año"], errors="coerce").astype(int)
+    long_df["BarreraSaludPct"] = pd.to_numeric(long_df["BarreraSaludPct"], errors="coerce")
+
+    fig = px.line(
+        long_df,
+        x="Año",
+        y="BarreraSaludPct",
+        color="Departamento",
+        markers=True,
+        title="Evolucion de barreras de acceso en salud",
+        labels={"BarreraSaludPct": "% con barreras", "Departamento": "Departamento"},
+    )
+    fig.update_yaxes(ticksuffix="%")
+    fig = style_chart(fig)
+    chart_container(fig)
+
+    idx_df = long_df.copy()
+    base_vals = (
+        idx_df[idx_df["Año"] == min(year_cols)][["Departamento", "BarreraSaludPct"]]
+        .rename(columns={"BarreraSaludPct": "Base2019"})
+    )
+    idx_df = idx_df.merge(base_vals, on="Departamento", how="left")
+    idx_df["IndiceBase2019"] = (idx_df["BarreraSaludPct"] / idx_df["Base2019"]) * 100.0
+
+    fig_idx = px.line(
+        idx_df,
+        x="Año",
+        y="IndiceBase2019",
+        color="Departamento",
+        markers=True,
+        title="Comparacion relativa (Indice base 2019 = 100)",
+        labels={"IndiceBase2019": "Indice", "Departamento": "Departamento"},
+    )
+    fig_idx = style_chart(fig_idx)
+    chart_container(fig_idx)
+
+    avg_df = (
+        long_df.groupby("Departamento", as_index=False)["BarreraSaludPct"]
+        .mean()
+        .rename(columns={"BarreraSaludPct": "Promedio_2019_2024"})
+        .sort_values("Promedio_2019_2024", ascending=False)
+        .reset_index(drop=True)
+    )
+    st.dataframe(
+        avg_df.style.format({"Promedio_2019_2024": "{:.2f}%"}),
+        width="stretch",
+        hide_index=True,
+    )
+
+
 view = subsection_selector(
     ["Resumen", "Mortalidad", "Contexto regional", "Comparacion EPS"],
     key="contexto_demanda_view",
@@ -199,6 +292,7 @@ if view == "Resumen":
     section_header("Calculo central de poblacion objetivo")
     snapshot = _compute_and_store_target_population_snapshot()
     _render_target_population(snapshot, show_age_block=True, show_formula_block=True)
+    _render_barrera_salud_section()
 
 elif view == "Mortalidad":
     section_header("Distribucion de causas de defuncion", "Colombia")

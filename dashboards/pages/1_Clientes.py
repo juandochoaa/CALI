@@ -4,7 +4,7 @@ import re
 import sys
 import unicodedata
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -28,9 +28,11 @@ from dashboards.ui import (
 from src.models.eps_montecarlo import (
     EPS_OBJ_DEFAULT,
     PROBABILITY_COLUMNS,
+    build_eps_historical_compliance,
     build_composite_ranking,
     build_income_statement_view,
     compute_market_share_valle,
+    compute_reclamos_score,
     impute_missing_probabilities,
     run_eps_montecarlo,
     score_risk_percentiles,
@@ -41,7 +43,7 @@ apply_theme()
 
 page_header(
     "Clientes",
-    "Ranking EPS por riesgo Monte Carlo y mercado en Valle del Cauca.",
+    "Ranking EPS por riesgo Monte Carlo, mercado Valle y tasa de reclamos.",
     "EPS Monte Carlo",
 )
 
@@ -76,6 +78,27 @@ def find_col(columns: List[str], includes: List[str]) -> str | None:
     return None
 
 
+def validate_reclamos_sheet(df: pd.DataFrame) -> str | None:
+    if df.empty:
+        return "La hoja RECLAMOS esta vacia."
+
+    cols = [str(c) for c in df.columns]
+    eps_col = find_col(cols, ["eps"])
+    tasa_col = find_col(
+        cols,
+        [
+            "tasa x cada 10.000 afiliados",
+            "tasa x cada 10000 afiliados",
+            "tasa",
+        ],
+    )
+    if eps_col is None:
+        return "La hoja RECLAMOS no tiene columna EPS."
+    if tasa_col is None:
+        return "La hoja RECLAMOS no tiene columna de TASA X CADA 10.000 AFILIADOS."
+    return None
+
+
 def risk_bucket(score: float | None) -> str:
     if score is None or pd.isna(score):
         return "Sin dato"
@@ -86,21 +109,166 @@ def risk_bucket(score: float | None) -> str:
     return "Alto riesgo"
 
 
-def load_cali_sheet(aliases: List[str]) -> tuple[pd.DataFrame, str]:
+def render_score_methodology() -> None:
+    def formula_gap(px: int = 16) -> None:
+        st.markdown(f"<div style='height:{px}px'></div>", unsafe_allow_html=True)
+
+    section_header("Metodologia del Score EPS", "Modelo unificado con riesgo, mercado y reclamos")
+    st.markdown("**1) Riesgo Monte Carlo (60%)**")
+    st.latex(
+        r"P_{avg,m}=\frac{1}{N_{sim}}\sum_{s=1}^{N_{sim}}\left(\frac{1}{T}\sum_{t=1}^{T}\mathbf{1}[incumple_{m,s,t}]\right)"
+    )
+    formula_gap(20)
+    st.latex(r"Score_{Riesgo}=\frac{1}{M}\sum_{m=1}^{M}Percentil_{inv}(P_{avg,m})")
+
+    divider()
+    st.markdown("**2) Mercado Valle (20%)**")
+    st.latex(r"MarketShare_{EPS}=\frac{Afiliados_{EPS,Valle}}{\sum_j Afiliados_{j,Valle}}")
+    formula_gap(20)
+    st.latex(r"Score_{Mercado}=Percentil_{dir}(MarketShare_{EPS})")
+
+    divider()
+    st.markdown("**3) Reclamos x 10.000 (20%)**")
+    st.latex(
+        r"Tasa_{10k,EPS}=\text{valor de la hoja RECLAMOS en columna }TASA\ X\ CADA\ 10.000\ AFILIADOS"
+    )
+    formula_gap(20)
+    st.latex(r"Score_{Reclamos}=Percentil_{inv}(Tasa_{10k,EPS})")
+
+    divider()
+    st.markdown("**Score final ponderado**")
+    st.latex(
+        r"Score_{Final}=0.60\cdot Score_{Riesgo}+0.20\cdot Score_{Mercado}+0.20\cdot Score_{Reclamos}"
+    )
+
+    formulas_df = pd.DataFrame(
+        [
+            {"Variable": "P_avg_*", "Definicion": "Probabilidad promedio de incumplimiento por metrica en el horizonte."},
+            {"Variable": "Score_Riesgo", "Definicion": "Promedio de percentiles invertidos de P_avg_* (menor probabilidad = mejor)."},
+            {"Variable": "Score_Mercado", "Definicion": "Percentil directo de participacion de afiliados en Valle."},
+            {"Variable": "Tasa_Reclamos_10k", "Definicion": "Tasa de reclamos por cada 10.000 afiliados (hoja RECLAMOS)."},
+            {"Variable": "Score_Reclamos", "Definicion": "Percentil invertido de la tasa de reclamos (menor tasa = mejor)."},
+            {"Variable": "Score_Final", "Definicion": "Combinacion ponderada 60/20/20 de riesgo, mercado y reclamos."},
+        ]
+    )
+    st.dataframe(formulas_df, width="stretch", hide_index=True)
+
+    divider()
+    section_header("Detalle tecnico Monte Carlo", "Supuestos, variables estocasticas y ecuaciones del modelo")
+    st.markdown(
+        (
+            "El modelo simula trayectorias anuales por EPS desde el ano posterior al ancla financiera "
+            "hasta el horizonte definido. En cada trayectoria se generan drivers aleatorios, se "
+            "actualizan ingresos y estructura financiera, y luego se evalua incumplimiento en cada metrica."
+        )
+    )
+
+    st.markdown("**1) Variables estocasticas por ano y simulacion**")
+    st.markdown(
+        (
+            "Se simulan 5 drivers: crecimiento de afiliados `g`, loss ratio `LR`, admin ratio `AR`, "
+            "otros gastos operativos `OER` y ratio de reservas `rho_res`."
+        )
+    )
+    st.latex(r"X_{k,s,t}=\mathrm{clip}\left(\mathcal{N}\left(\mu_k+\Delta_k,\sigma_k\right),L_k,U_k\right)")
+    st.markdown("Donde `k in {g, LR, AR, OER, rho_res}`.")
+    st.latex(r"\Delta_g=g_{shift}^{escenario},\qquad \Delta_{LR}=LR_{shift}^{escenario}")
+    st.markdown(
+        (
+            "Los parametros `mu` y `sigma` se estiman por EPS con historico 2019..ano ancla. "
+            "Los escenarios estresan `g` y `LR`; los demas drivers mantienen su distribucion base."
+        )
+    )
+
+    divider()
+    st.markdown("**2) Como se usa la UPC (proyeccion por segmento y mezcla EPS)**")
+    st.markdown(
+        (
+            "Primero se proyecta UPC por segmento (`Regimen x GrupoEdad_UPC`) con crecimiento anual "
+            "ajustado por optimism factor."
+        )
+    )
+    st.latex(r"g^{base}_{seg}=\left(\frac{UPC_{seg,y_1}}{UPC_{seg,y_0}}\right)^{\frac{1}{y_1-y_0}}-1")
+    st.latex(r"g^{adj}_{seg}=g^{base}_{seg}\cdot f_{optimism},\qquad UPC_{seg,t}=UPC_{seg,t-1}\cdot (1+g^{adj}_{seg})")
+    st.markdown(
+        (
+            "Luego se calcula `UPC_mix` por EPS usando pesos etarios/regimen fijos de `EPS_Edad` "
+            "(mix observado, sin cambio de composicion en el horizonte)."
+        )
+    )
+    st.latex(r"UPC\_mix_{e,t}=\sum_{r,a} w_{e,r,a}\cdot UPC_{r,a,t},\qquad \sum_{r,a} w_{e,r,a}=1")
+
+    divider()
+    st.markdown("**3) Dinamica anual del estado financiero simulado**")
+    st.latex(r"Afiliados_{s,t}=Afiliados_{s,t-1}\cdot(1+g_{s,t})")
+    st.latex(r"Ingresos_{s,t}=Afiliados_{s,t}\cdot UPC\_mix_{e,t}\cdot k_e")
+    st.latex(r"OPEX\_cash_{s,t}=Ingresos_{s,t}\cdot\left(LR_{s,t}+AR_{s,t}+OER_{s,t}\right)")
+    st.latex(r"Margen_{s,t}=Ingresos_{s,t}-OPEX\_cash_{s,t}")
+    st.latex(r"Cash_{s,t}=\max\left(0,\;Cash_{s,t-1}+\alpha\cdot Margen_{s,t}\right),\ \alpha=1")
+    st.latex(r"Equity_{s,t}=Equity_{s,t-1}+\beta\cdot Margen_{s,t},\ \beta=1")
+    st.latex(r"Reservas_{s,t}=Ingresos_{s,t}\cdot \rho\_{res,s,t}")
+    st.latex(r"Inversiones_{s,t}=Ingresos_{s,t}\cdot ratio\_{inv,0}")
+
+    st.markdown("**4) Ratios de cumplimiento evaluados cada ano**")
+    st.latex(r"CashDays_{s,t}=365\cdot\frac{Cash_{s,t}}{OPEX\_cash_{s,t}}")
+    st.latex(r"CM\_ratio_{s,t}=\frac{Equity_{s,t}}{CapMinReq_e}")
+    st.latex(r"PA\_ratio_{s,t}=\frac{Equity_{s,t}}{0.08\cdot Ingresos_{s,t}\cdot LR_{s,t}}")
+    st.latex(r"RI\_ratio_{s,t}=\frac{Cash_{s,t}+Inversiones_{s,t}}{Reservas_{s,t}}")
+
+    divider()
+    st.markdown("**5) Probabilidad promedio de incumplimiento (enfoque PROMEDIO)**")
+    st.latex(
+        r"P_{avg,m}=\frac{1}{N_{sim}}\sum_{s=1}^{N_{sim}}\left(\frac{1}{T}\sum_{t=1}^{T}\mathbf{1}\left[incumple_{m,s,t}\right]\right)"
+    )
+    st.markdown(
+        (
+            "Cada metrica `m` produce una probabilidad promedio `P_avg`. Luego estas probabilidades "
+            "se convierten a score por percentiles invertidos (menor probabilidad = mayor score)."
+        )
+    )
+
+
+def resolve_cali_excel_path() -> Path | None:
     path = ROOT_DIR / "data" / "raw" / "Cali ANALISIS.xlsx"
-    if not path.exists():
-        alt = ROOT_DIR / "Cali ANALISIS.xlsx"
-        if alt.exists():
-            path = alt
-    if not path.exists():
+    if path.exists():
+        return path
+    alt = ROOT_DIR / "Cali ANALISIS.xlsx"
+    if alt.exists():
+        return alt
+    return None
+
+
+def file_signature(path: Path) -> str:
+    stat = path.stat()
+    return f"{stat.st_mtime_ns}-{stat.st_size}"
+
+
+@st.cache_data(show_spinner=False)
+def _cached_sheet_names(path_str: str, sig: str) -> List[str]:
+    _ = sig
+    return pd.ExcelFile(path_str).sheet_names
+
+
+@st.cache_data(show_spinner=False)
+def _cached_read_sheet(path_str: str, sheet_name: str, sig: str) -> pd.DataFrame:
+    _ = sig
+    df = pd.read_excel(path_str, sheet_name=sheet_name)
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+
+def load_cali_sheet(aliases: List[str]) -> tuple[pd.DataFrame, str]:
+    path = resolve_cali_excel_path()
+    if path is None:
         return pd.DataFrame(), "Archivo no encontrado: Cali ANALISIS.xlsx"
 
     try:
-        xls = pd.ExcelFile(path)
+        sig = file_signature(path)
+        sheet_names = _cached_sheet_names(str(path), sig)
     except Exception as exc:
         return pd.DataFrame(), f"No se pudo abrir Cali ANALISIS.xlsx: {exc}"
 
-    normalized_sheet_map = {normalize_sheet_name(s): s for s in xls.sheet_names}
+    normalized_sheet_map = {normalize_sheet_name(s): s for s in sheet_names}
     selected_sheet = None
     for alias in aliases:
         key = normalize_sheet_name(alias)
@@ -108,14 +276,60 @@ def load_cali_sheet(aliases: List[str]) -> tuple[pd.DataFrame, str]:
             selected_sheet = normalized_sheet_map[key]
             break
     if selected_sheet is None:
-        return pd.DataFrame(), f"No se encontro hoja para aliases {aliases}. Disponibles: {xls.sheet_names}"
+        return pd.DataFrame(), f"No se encontro hoja para aliases {aliases}. Disponibles: {sheet_names}"
 
     try:
-        df = pd.read_excel(path, sheet_name=selected_sheet)
-        df.columns = [str(c).strip() for c in df.columns]
+        df = _cached_read_sheet(str(path), selected_sheet, sig)
         return df, f"Excel: {path.name} (hoja {selected_sheet})"
     except Exception as exc:
         return pd.DataFrame(), f"Error leyendo hoja {selected_sheet}: {exc}"
+
+
+def load_cali_sheet_by_column_tokens(
+    required_column_tokens: List[List[str]],
+) -> tuple[pd.DataFrame, str]:
+    path = resolve_cali_excel_path()
+    if path is None:
+        return pd.DataFrame(), "Archivo no encontrado: Cali ANALISIS.xlsx"
+
+    try:
+        sig = file_signature(path)
+        sheet_names = _cached_sheet_names(str(path), sig)
+    except Exception as exc:
+        return pd.DataFrame(), f"No se pudo abrir Cali ANALISIS.xlsx: {exc}"
+
+    def has_required_columns(columns: List[str]) -> bool:
+        normalized_cols = [normalize_account(c) for c in columns]
+        for token_set in required_column_tokens:
+            token_set_norm = [normalize_account(t) for t in token_set]
+            ok = any(all(tok in col for tok in token_set_norm) for col in normalized_cols)
+            if not ok:
+                return False
+        return True
+
+    for sheet_name in sheet_names:
+        try:
+            preview = pd.read_excel(path, sheet_name=sheet_name, nrows=5)
+        except Exception:
+            continue
+        preview_cols = [str(c).strip() for c in preview.columns]
+        if has_required_columns(preview_cols):
+            try:
+                df = _cached_read_sheet(str(path), sheet_name, sig)
+                return (
+                    df,
+                    (
+                        f"Excel: {path.name} (hoja {sheet_name}, autodetectada por columnas: "
+                        f"{required_column_tokens})"
+                    ),
+                )
+            except Exception as exc:
+                return pd.DataFrame(), f"Error leyendo hoja autodetectada {sheet_name}: {exc}"
+
+    return (
+        pd.DataFrame(),
+        f"No se encontro hoja con columnas requeridas {required_column_tokens}. Disponibles: {sheet_names}",
+    )
 
 
 def affiliates_55_table(age_df: pd.DataFrame) -> pd.DataFrame | None:
@@ -226,6 +440,92 @@ def regimen_valle_table(mun_df: pd.DataFrame) -> pd.DataFrame | None:
     return out
 
 
+@st.cache_data(show_spinner=False)
+def run_clientes_pipeline(
+    eps_eeff_df: pd.DataFrame,
+    upc_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    eps_anos_df: pd.DataFrame,
+    eps_afiliados_df: pd.DataFrame,
+    reclamos_df: pd.DataFrame,
+    n_sim: int,
+    horizon_end: int,
+    upc_optimism_factor: float,
+    upc_growth_start_year: int,
+    upc_growth_end_year: int,
+    base_lr_shift: float,
+    base_g_shift: float,
+    stress_lr_shift: float,
+    stress_lr_g_shift: float,
+    stress_mix_lr_shift: float,
+    stress_mix_g_shift: float,
+) -> tuple[
+    Dict[str, Any],
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    pd.DataFrame,
+    Dict[str, Dict[str, float]],
+]:
+    scenarios = {
+        "BASE": {"LR_shift": base_lr_shift, "g_shift": base_g_shift},
+        "STRESS_LR": {"LR_shift": stress_lr_shift, "g_shift": stress_lr_g_shift},
+        "STRESS_MIX": {"LR_shift": stress_mix_lr_shift, "g_shift": stress_mix_g_shift},
+    }
+
+    results_df, diagnostics = run_eps_montecarlo(
+        upc_df=upc_df,
+        eps_eeff_df=eps_eeff_df,
+        eps_edad_df=eps_edad_df,
+        eps_afiliados_hist_df=eps_anos_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+        n_sim=n_sim,
+        horizon_end=horizon_end,
+        cash_thresholds=(15,),
+        upc_optimism_factor=upc_optimism_factor,
+        upc_growth_start_year=upc_growth_start_year,
+        upc_growth_end_year=upc_growth_end_year,
+        scenarios=scenarios,
+        random_seed=42,
+    )
+    market_share_df = compute_market_share_valle(
+        eps_afiliados_df=eps_afiliados_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+    )
+    results_imputed = impute_missing_probabilities(
+        results_df=results_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+        scenarios=list(scenarios.keys()),
+        probability_columns=PROBABILITY_COLUMNS,
+    )
+    results_scored = score_risk_percentiles(
+        df=results_imputed,
+        probability_columns=PROBABILITY_COLUMNS,
+    )
+    reclamos_scored_df = compute_reclamos_score(
+        reclamos_df=reclamos_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+    )
+    results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
+        scored_df=results_scored,
+        market_share_df=market_share_df,
+        reclamos_score_df=reclamos_scored_df,
+        risk_weight=0.6,
+        market_weight=0.2,
+        complaints_weight=0.2,
+    )
+    return (
+        diagnostics,
+        market_share_df,
+        reclamos_scored_df,
+        results_ranked,
+        ranking_escenario,
+        ranking_global,
+        scenarios,
+    )
+
+
 with st.sidebar:
     st.header("Monte Carlo EPS")
     n_sim = int(
@@ -261,6 +561,9 @@ with st.sidebar:
     upc_growth_end_year = int(
         st.number_input("Ano fin crecimiento UPC", min_value=2010, max_value=2035, value=2026, step=1)
     )
+    if upc_growth_end_year < upc_growth_start_year:
+        st.warning("Ano fin de crecimiento UPC menor al inicio; se intercambian para el calculo.")
+        upc_growth_start_year, upc_growth_end_year = upc_growth_end_year, upc_growth_start_year
 
     st.subheader("Shocks por escenario")
     with st.expander("BASE", expanded=False):
@@ -273,29 +576,34 @@ with st.sidebar:
         stress_mix_lr_shift = float(st.number_input("STRESS_MIX LR shift", value=0.05, step=0.01, format="%.2f"))
         stress_mix_g_shift = float(st.number_input("STRESS_MIX g shift", value=-0.03, step=0.01, format="%.2f"))
 
-    st.caption("Score final fijo: 80% riesgo Monte Carlo + 20% mercado Valle.")
+    st.caption("Score final: 60% riesgo Monte Carlo + 20% mercado Valle + 20% reclamos.")
 
-scenarios = {
-    "BASE": {"LR_shift": base_lr_shift, "g_shift": base_g_shift},
-    "STRESS_LR": {"LR_shift": stress_lr_shift, "g_shift": stress_lr_g_shift},
-    "STRESS_MIX": {"LR_shift": stress_mix_lr_shift, "g_shift": stress_mix_g_shift},
-}
+render_score_methodology()
 
 section_header("Datos fuente", "Modelo EPS")
 explain_box(
     "Como se calcula",
     [
-        "Se usa Cali ANALISIS.xlsx (hojas: EPS_EEFF, UPC, EPS_Edad, EPS_Anos, EPS_Afiliados).",
+        "Se usa Cali ANALISIS.xlsx (hojas: EPS_EEFF, UPC, EPS_Edad, EPS_Anos, EPS_Afiliados, RECLAMOS).",
         "Las probabilidades se calculan con Monte Carlo en enfoque PROMEDIO.",
         "El % de mercado se calcula sobre todo Valle del Cauca (denominador total Valle).",
+        "La tasa de reclamos por 10.000 afiliados se transforma a score por percentiles invertidos.",
     ],
 )
 
 eps_eeff_df, eps_eeff_src = load_cali_sheet(["EPS_EEFF", "EPS EEFF"])
 upc_df, upc_src = load_cali_sheet(["UPC"])
 eps_edad_df, eps_edad_src = load_cali_sheet(["EPS_Edad", "EPS Edad"])
-eps_anos_df, eps_anos_src = load_cali_sheet(["EPS_Años", "EPS_Anos", "EPS Anos", "EPS Anos"])
+eps_anos_df, eps_anos_src = load_cali_sheet(["EPS_Años", "EPS_Anos", "EPS Años", "EPS Anos"])
 eps_afiliados_df, eps_afiliados_src = load_cali_sheet(["EPS_Afiliados", "EPS Afiliados"])
+reclamos_df, reclamos_src = load_cali_sheet(["RECLAMOS", "Reclamos"])
+if reclamos_df.empty:
+    reclamos_df, reclamos_src = load_cali_sheet_by_column_tokens(
+        required_column_tokens=[
+            ["eps"],
+            ["tasa", "10"],
+        ]
+    )
 
 sources_ok = [
     ("EPS_EEFF", eps_eeff_df, eps_eeff_src),
@@ -303,62 +611,64 @@ sources_ok = [
     ("EPS_Edad", eps_edad_df, eps_edad_src),
     ("EPS_Anos", eps_anos_df, eps_anos_src),
     ("EPS_Afiliados", eps_afiliados_df, eps_afiliados_src),
+    ("RECLAMOS", reclamos_df, reclamos_src),
 ]
 for label, df_src, detail in sources_ok:
     if df_src.empty:
         st.error(f"No se pudo cargar {label}. Detalle: {detail}")
         st.stop()
 
+reclamos_validation_error = validate_reclamos_sheet(reclamos_df)
+if reclamos_validation_error:
+    st.error(f"No se pudo usar RECLAMOS. Detalle: {reclamos_validation_error}")
+    st.stop()
+
 with st.spinner("Ejecutando simulacion Monte Carlo..."):
-    results_df, diagnostics = run_eps_montecarlo(
-        upc_df=upc_df,
+    (
+        diagnostics,
+        market_share_df,
+        reclamos_scored_df,
+        results_ranked,
+        ranking_escenario,
+        ranking_global,
+        scenarios,
+    ) = run_clientes_pipeline(
         eps_eeff_df=eps_eeff_df,
+        upc_df=upc_df,
         eps_edad_df=eps_edad_df,
-        eps_afiliados_hist_df=eps_anos_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_anos_df=eps_anos_df,
+        eps_afiliados_df=eps_afiliados_df,
+        reclamos_df=reclamos_df,
         n_sim=n_sim,
         horizon_end=horizon_end,
-        cash_thresholds=(15, 0),
         upc_optimism_factor=upc_optimism_factor,
         upc_growth_start_year=upc_growth_start_year,
         upc_growth_end_year=upc_growth_end_year,
-        scenarios=scenarios,
-        random_seed=42,
-    )
-    market_share_df = compute_market_share_valle(
-        eps_afiliados_df=eps_afiliados_df,
-        eps_obj=EPS_OBJ_DEFAULT,
-    )
-    results_imputed = impute_missing_probabilities(
-        results_df=results_df,
-        eps_obj=EPS_OBJ_DEFAULT,
-        scenarios=list(scenarios.keys()),
-        probability_columns=PROBABILITY_COLUMNS,
-    )
-    results_scored = score_risk_percentiles(
-        df=results_imputed,
-        probability_columns=PROBABILITY_COLUMNS,
-    )
-    results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
-        scored_df=results_scored,
-        market_share_df=market_share_df,
-        risk_weight=0.8,
-        market_weight=0.2,
+        base_lr_shift=base_lr_shift,
+        base_g_shift=base_g_shift,
+        stress_lr_shift=stress_lr_shift,
+        stress_lr_g_shift=stress_lr_g_shift,
+        stress_mix_lr_shift=stress_mix_lr_shift,
+        stress_mix_g_shift=stress_mix_g_shift,
     )
 
 ranking_global_exec = ranking_global.copy()
 ranking_global_exec["Riesgo"] = ranking_global_exec["Score_Final"].map(risk_bucket)
 ranking_global_exec["Imputada"] = ranking_global_exec["prob_imputada"].map({True: "Si", False: "No"})
+ranking_global_exec["Imputada_Reclamos"] = ranking_global_exec["reclamos_imputado"].map(
+    {True: "Si", False: "No"}
+)
 
 tab_analisis, tab_datos, tab_eps = st.tabs(["Analisis", "Datos", "Analisis EPS"])
 
 with tab_analisis:
-    section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle")
+    section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle + reclamos")
     scen_choice = st.selectbox("Escenario", list(scenarios.keys()), index=0)
 
     ranking_exec = ranking_escenario[ranking_escenario["Escenario"] == scen_choice].copy()
     ranking_exec["Riesgo"] = ranking_exec["Score_Final"].map(risk_bucket)
     ranking_exec["Imputada"] = ranking_exec["prob_imputada"].map({True: "Si", False: "No"})
+    ranking_exec["Imputada_Reclamos"] = ranking_exec["reclamos_imputado"].map({True: "Si", False: "No"})
 
     top_eps = ranking_exec.sort_values("Ranking_Escenario_Final").head(1)
     top_name = top_eps["EPS"].iloc[0] if not top_eps.empty else "NA"
@@ -370,14 +680,17 @@ with tab_analisis:
         else np.nan
     )
     imputadas_n = int(ranking_exec["prob_imputada"].sum()) if not ranking_exec.empty else 0
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("EPS evaluadas", f"{len(ranking_exec):,}")
-    m2.metric("Lider escenario", str(top_name).upper())
-    m3.metric("Score lider", f"{top_score:.1f}" if pd.notna(top_score) else "NA")
-    m4.metric("Score promedio", f"{mean_score:.1f}" if pd.notna(mean_score) else "NA")
-    m5.metric("Mercado Top 3", f"{top3_share:.1%}" if pd.notna(top3_share) else "NA")
-    st.caption(f"EPS con imputacion por datos historicos insuficientes: {imputadas_n}")
+    resumen_exec = pd.DataFrame(
+        [
+            {"Indicador": "EPS evaluadas", "Valor": f"{len(ranking_exec):,}"},
+            {"Indicador": "Lider escenario", "Valor": str(top_name).upper()},
+            {"Indicador": "Score lider", "Valor": f"{top_score:.1f}" if pd.notna(top_score) else "NA"},
+            {"Indicador": "Score promedio", "Valor": f"{mean_score:.1f}" if pd.notna(mean_score) else "NA"},
+            {"Indicador": "Mercado Top 3", "Valor": f"{top3_share:.1%}" if pd.notna(top3_share) else "NA"},
+            {"Indicador": "EPS con imputacion EEFF", "Valor": f"{imputadas_n}"},
+        ]
+    )
+    st.dataframe(resumen_exec, width="stretch", hide_index=True)
 
     divider()
     section_header("Tablero de decision", "Top y alertas por escenario seleccionado")
@@ -395,14 +708,19 @@ with tab_analisis:
                     "Score_Final",
                     "Score_Riesgo",
                     "Score_Mercado",
+                    "Score_Reclamos",
+                    "Tasa_Reclamos_10k",
                     "MarketShare_Valle",
                     "Imputada",
+                    "Imputada_Reclamos",
                 ]
             ].style.format(
                 {
                     "Score_Final": "{:.1f}",
                     "Score_Riesgo": "{:.1f}",
                     "Score_Mercado": "{:.1f}",
+                    "Score_Reclamos": "{:.1f}",
+                    "Tasa_Reclamos_10k": "{:.2f}",
                     "MarketShare_Valle": "{:.2%}",
                 }
             ),
@@ -421,13 +739,18 @@ with tab_analisis:
                     "Riesgo",
                     "Score_Final",
                     "Score_Riesgo",
+                    "Score_Reclamos",
+                    "Tasa_Reclamos_10k",
                     "MarketShare_Valle",
                     "Imputada",
+                    "Imputada_Reclamos",
                 ]
             ].style.format(
                 {
                     "Score_Final": "{:.1f}",
                     "Score_Riesgo": "{:.1f}",
+                    "Score_Reclamos": "{:.1f}",
+                    "Tasa_Reclamos_10k": "{:.2f}",
                     "MarketShare_Valle": "{:.2%}",
                 }
             ),
@@ -436,7 +759,7 @@ with tab_analisis:
         )
 
     divider()
-    section_header("Ranking por escenario", "Score final = 80% riesgo + 20% mercado")
+    section_header("Ranking por escenario", "Score final = 60% riesgo + 20% mercado + 20% reclamos")
     st.dataframe(
         ranking_exec[
             [
@@ -447,14 +770,19 @@ with tab_analisis:
                 "Score_Final",
                 "Score_Riesgo",
                 "Score_Mercado",
+                "Score_Reclamos",
+                "Tasa_Reclamos_10k",
                 "MarketShare_Valle",
                 "Imputada",
+                "Imputada_Reclamos",
             ]
         ].style.format(
             {
                 "Score_Final": "{:.1f}",
                 "Score_Riesgo": "{:.1f}",
                 "Score_Mercado": "{:.1f}",
+                "Score_Reclamos": "{:.1f}",
+                "Tasa_Reclamos_10k": "{:.2f}",
                 "MarketShare_Valle": "{:.2%}",
             }
         ),
@@ -493,15 +821,20 @@ with tab_analisis:
                 "Score_Final",
                 "Score_Riesgo",
                 "Score_Mercado",
+                "Score_Reclamos",
+                "Tasa_Reclamos_10k",
                 "MarketShare_Valle",
                 "Afiliados_Valle",
                 "Imputada",
+                "Imputada_Reclamos",
             ]
         ].style.format(
             {
                 "Score_Final": "{:.1f}",
                 "Score_Riesgo": "{:.1f}",
                 "Score_Mercado": "{:.1f}",
+                "Score_Reclamos": "{:.1f}",
+                "Tasa_Reclamos_10k": "{:.2f}",
                 "MarketShare_Valle": "{:.2%}",
                 "Afiliados_Valle": "{:,.0f}",
             }
@@ -518,13 +851,29 @@ with tab_analisis:
                 "P_avg_* = proporcion promedio de anos de incumplimiento en la simulacion.",
                 "Se imputan probabilidades faltantes por promedio del escenario.",
                 "prob_imputada identifica EPS con faltantes historicos en EEFF.",
+                "Score_Reclamos se obtiene por percentil invertido de Tasa_Reclamos_10k.",
             ],
         )
-        prob_cols = ["Escenario", "EPS"] + PROBABILITY_COLUMNS + ["prob_imputada", "motivo_imputacion"]
+        prob_cols = (
+            ["Escenario", "EPS"]
+            + PROBABILITY_COLUMNS
+            + [
+                "Tasa_Reclamos_10k",
+                "Score_Reclamos",
+                "reclamos_imputado",
+                "motivo_imputacion_reclamos",
+                "prob_imputada",
+                "motivo_imputacion",
+            ]
+        )
         prob_view = results_ranked[prob_cols].copy().sort_values(["Escenario", "EPS"])
         prob_view["prob_imputada"] = prob_view["prob_imputada"].map({True: "Si", False: "No"})
+        prob_view["reclamos_imputado"] = prob_view["reclamos_imputado"].map({True: "Si", False: "No"})
         st.dataframe(
-            prob_view.style.format({col: "{:.2%}" for col in PROBABILITY_COLUMNS}),
+            prob_view.style.format(
+                {col: "{:.2%}" for col in PROBABILITY_COLUMNS}
+                | {"Score_Reclamos": "{:.1f}", "Tasa_Reclamos_10k": "{:.2f}"}
+            ),
             width="stretch",
             hide_index=True,
         )
@@ -544,6 +893,20 @@ with tab_datos:
     share_view = share_view.rename(columns={"MarketShare_Valle": "% Mercado Valle"})
     st.dataframe(
         share_view.style.format({"Afiliados_Valle": "{:,.0f}", "% Mercado Valle": "{:.2%}"}),
+        width="stretch",
+        hide_index=True,
+    )
+
+    divider()
+    section_header("Reclamos por EPS", "Tasa x cada 10.000 afiliados (menor = mejor)")
+    st.dataframe(
+        reclamos_scored_df.sort_values("Tasa_Reclamos_10k", ascending=True).style.format(
+            {
+                "Tasa_Reclamos_10k": "{:.2f}",
+                "Reclamos": "{:,.0f}",
+                "Score_Reclamos": "{:.1f}",
+            }
+        ),
         width="stretch",
         hide_index=True,
     )
@@ -599,12 +962,25 @@ with tab_eps:
     score_global = float(eps_global["Score_Final"].iloc[0]) if not eps_global.empty else np.nan
     riesgo_global = str(eps_global["Riesgo"].iloc[0]) if not eps_global.empty else "Sin dato"
     share_valle = float(eps_global["MarketShare_Valle"].iloc[0]) if not eps_global.empty else np.nan
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Ranking global", f"#{rank_global}" if pd.notna(rank_global) else "NA")
-    k2.metric("Score global", f"{score_global:.1f}" if pd.notna(score_global) else "NA")
-    k3.metric("Riesgo", riesgo_global)
-    k4.metric("% mercado Valle", f"{share_valle:.2%}" if pd.notna(share_valle) else "NA")
+    score_reclamos_global = float(eps_global["Score_Reclamos"].iloc[0]) if not eps_global.empty else np.nan
+    tasa_reclamos_global = float(eps_global["Tasa_Reclamos_10k"].iloc[0]) if not eps_global.empty else np.nan
+    resumen_eps = pd.DataFrame(
+        [
+            {"Indicador": "Ranking global", "Valor": f"#{rank_global}" if pd.notna(rank_global) else "NA"},
+            {"Indicador": "Score global", "Valor": f"{score_global:.1f}" if pd.notna(score_global) else "NA"},
+            {"Indicador": "Riesgo", "Valor": riesgo_global},
+            {"Indicador": "% mercado Valle", "Valor": f"{share_valle:.2%}" if pd.notna(share_valle) else "NA"},
+            {
+                "Indicador": "Score reclamos",
+                "Valor": f"{score_reclamos_global:.1f}" if pd.notna(score_reclamos_global) else "NA",
+            },
+            {
+                "Indicador": "Tasa reclamos 10k",
+                "Valor": f"{tasa_reclamos_global:.2f}" if pd.notna(tasa_reclamos_global) else "NA",
+            },
+        ]
+    )
+    st.dataframe(resumen_eps, width="stretch", hide_index=True)
 
     section_header("Estado de resultados (anual)")
     income_df = build_income_statement_view(diagnostics["base_eps"], selected_eps)
@@ -629,6 +1005,27 @@ with tab_eps:
         )
 
     divider()
+    section_header("Cumplimiento historico CM/PA/RI", "Solo EPS - calculado con historico contable")
+    compliance_df = build_eps_historical_compliance(diagnostics["base_eps"], selected_eps)
+    if compliance_df.empty:
+        st.info("No hay datos historicos suficientes para calcular cumplimiento CM/PA/RI.")
+    else:
+        compliance_show = compliance_df.copy()
+        for col in ["Cumple_CM", "Cumple_PA", "Cumple_RI", "Cumple_3_de_3"]:
+            compliance_show[col] = compliance_show[col].map({True: "Si", False: "No"})
+        st.dataframe(
+            compliance_show.style.format(
+                {
+                    "CM_ratio": "{:.2f}",
+                    "PA_ratio": "{:.2f}",
+                    "RI_ratio": "{:.2f}",
+                }
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+    divider()
     section_header("Probabilidades y scoring de la EPS", "Resultados por escenario")
     eps_prob_cols = [
         "Escenario",
@@ -637,8 +1034,16 @@ with tab_eps:
         "Score_Final",
         "Score_Riesgo",
         "Score_Mercado",
+        "Score_Reclamos",
+        "Tasa_Reclamos_10k",
+        "Reclamos",
         "MarketShare_Valle",
-    ] + PROBABILITY_COLUMNS + ["prob_imputada", "motivo_imputacion"]
+    ] + PROBABILITY_COLUMNS + [
+        "prob_imputada",
+        "motivo_imputacion",
+        "reclamos_imputado",
+        "motivo_imputacion_reclamos",
+    ]
     eps_probs = (
         ranking_escenario[ranking_escenario["EPS"] == selected_eps][eps_prob_cols]
         .sort_values("Escenario")
@@ -650,10 +1055,14 @@ with tab_eps:
     else:
         eps_probs["Riesgo"] = eps_probs["Score_Final"].map(risk_bucket)
         eps_probs["prob_imputada"] = eps_probs["prob_imputada"].map({True: "Si", False: "No"})
+        eps_probs["reclamos_imputado"] = eps_probs["reclamos_imputado"].map({True: "Si", False: "No"})
         eps_fmt = {
             "Score_Final": "{:.1f}",
             "Score_Riesgo": "{:.1f}",
             "Score_Mercado": "{:.1f}",
+            "Score_Reclamos": "{:.1f}",
+            "Tasa_Reclamos_10k": "{:.2f}",
+            "Reclamos": "{:,.0f}",
             "MarketShare_Valle": "{:.2%}",
         }
         eps_fmt.update({col: "{:.2%}" for col in PROBABILITY_COLUMNS})
@@ -670,3 +1079,4 @@ with tab_eps:
     st.caption(eps_edad_src)
     st.caption(eps_anos_src)
     st.caption(eps_afiliados_src)
+    st.caption(reclamos_src)

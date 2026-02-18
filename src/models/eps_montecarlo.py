@@ -27,7 +27,6 @@ PROBABILITY_COLUMNS: List[str] = [
     "P_avg_PA_ratio_lt_1",
     "P_avg_RI_ratio_lt_1",
     "P_avg_CashDays_lt_15",
-    "P_avg_CashDays_lt_0",
 ]
 
 
@@ -48,6 +47,45 @@ def _canonicalize_eps(series: pd.Series, eps_obj: Sequence[str]) -> pd.Series:
         .str.strip()
         .map(lambda x: mapping.get(_norm_text(x), str(x).strip()))
     )
+
+
+def _canonicalize_eps_value(value: Any, eps_obj: Sequence[str]) -> str:
+    text = str(value).strip()
+    if not text:
+        return text
+
+    base_norm = _norm_text(text)
+    base_compact = base_norm.replace(" ", "")
+    variants = {
+        base_norm,
+        base_compact,
+        _norm_text(base_norm.replace(" eps", "")),
+        _norm_text(base_norm.replace("eps ", "")),
+        _norm_text(base_norm + " eps"),
+        _norm_text(("eps " + base_norm).strip()),
+        _norm_text(base_norm.replace("-", " ")),
+        _norm_text(base_norm.replace(".", " ")),
+    }
+    variants = {v for v in variants if v}
+
+    mapping: Dict[str, str] = {}
+    for eps in eps_obj:
+        eps_norm = _norm_text(eps)
+        eps_compact = eps_norm.replace(" ", "")
+        keys = {
+            eps_norm,
+            eps_compact,
+            _norm_text(eps_norm.replace(" eps", "")),
+            _norm_text(eps_norm.replace("eps ", "")),
+        }
+        for key in keys:
+            if key:
+                mapping[key] = eps
+
+    for key in variants:
+        if key in mapping:
+            return mapping[key]
+    return text
 
 
 def _to_long_year(df: pd.DataFrame, id_vars: List[str], value_name: str) -> pd.DataFrame:
@@ -71,6 +109,26 @@ def _resolve_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
         if col is not None:
             return col
     return None
+
+
+def _resolve_year_column(df: pd.DataFrame) -> str:
+    for candidate in ["Año", "AÃ±o", "AÃƒÂ±o", "Ano", "year", "Year"]:
+        if candidate in df.columns:
+            return candidate
+    for col in df.columns:
+        norm = _norm_text(col)
+        if norm in {"ano", "year"}:
+            return col
+    for col in df.columns:
+        if str(col).strip().lower() == "eps":
+            continue
+        series = pd.to_numeric(df[col], errors="coerce")
+        valid = series.dropna()
+        if valid.empty:
+            continue
+        if valid.between(1900, 2100).all() and valid.nunique() >= 2:
+            return col
+    raise KeyError("No se encontro columna de ano.")
 
 
 def _numeric_series(df: pd.DataFrame, candidates: Iterable[str], default: float = np.nan) -> pd.Series:
@@ -102,6 +160,86 @@ def _safe_div(numer: np.ndarray, denom: np.ndarray) -> np.ndarray:
         out=np.full_like(numer, np.nan, dtype=float),
         where=denom != 0,
     )
+
+
+def _build_capmin_map(eps_list: Sequence[str]) -> Dict[str, float]:
+    capmin_map = {str(eps): 19500.0 for eps in eps_list}
+    if "ASMETSALUD EPS" in capmin_map:
+        capmin_map["ASMETSALUD EPS"] = 17800.0
+    if "EMSSANAR EPS" in capmin_map:
+        capmin_map["EMSSANAR EPS"] = 17800.0
+    return capmin_map
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(out):
+        return default
+    return out
+
+
+def _recent_mean(series: pd.Series, recent_years: int = 3) -> float:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if values.empty:
+        return np.nan
+    return float(values.tail(recent_years).mean())
+
+
+def _build_mean_reversion_params(
+    hist_df: pd.DataFrame,
+    eps_list: Sequence[str],
+    recent_years: int = 3,
+) -> pd.DataFrame:
+    year_col = _resolve_year_column(hist_df)
+    rows: List[Dict[str, Any]] = []
+    for eps in eps_list:
+        eps_hist = hist_df[hist_df["EPS"] == eps].copy()
+        eps_hist = eps_hist.sort_values(year_col)
+
+        mu_long_g = _safe_float(pd.to_numeric(eps_hist["g"], errors="coerce").mean(), default=0.0)
+        mu_long_lr = _safe_float(pd.to_numeric(eps_hist["LR"], errors="coerce").mean(), default=0.0)
+        mu_recent_g = _safe_float(_recent_mean(eps_hist["g"], recent_years=recent_years), default=mu_long_g)
+        mu_recent_lr = _safe_float(
+            _recent_mean(eps_hist["LR"], recent_years=recent_years),
+            default=mu_long_lr,
+        )
+
+        sigma_long_g = _safe_float(pd.to_numeric(eps_hist["g"], errors="coerce").std(ddof=1), default=0.0)
+        sigma_long_lr = _safe_float(pd.to_numeric(eps_hist["LR"], errors="coerce").std(ddof=1), default=0.0)
+
+        lambda_g = float(
+            np.clip(
+                0.05 + 0.10 * (abs(mu_recent_g - mu_long_g) / (sigma_long_g + 1e-6)),
+                0.05,
+                0.25,
+            )
+        )
+        lambda_lr = float(
+            np.clip(
+                0.05 + 0.10 * (abs(mu_recent_lr - mu_long_lr) / (sigma_long_lr + 1e-6)),
+                0.05,
+                0.25,
+            )
+        )
+
+        rows.append(
+            {
+                "EPS": eps,
+                "mu_long_g": mu_long_g,
+                "mu_recent_g": mu_recent_g,
+                "sigma_long_g": sigma_long_g,
+                "lambda_g": lambda_g,
+                "mu_long_lr": mu_long_lr,
+                "mu_recent_lr": mu_recent_lr,
+                "sigma_long_lr": sigma_long_lr,
+                "lambda_lr": lambda_lr,
+            }
+        )
+
+    return pd.DataFrame(rows).sort_values("EPS").reset_index(drop=True)
 
 
 def _percentile_score_low_is_better(series: pd.Series) -> pd.Series:
@@ -364,7 +502,7 @@ def run_eps_montecarlo(
     eps_obj: Sequence[str] | None = None,
     n_sim: int = 10_000,
     horizon_end: int = 2030,
-    cash_thresholds: Sequence[int] = (15, 0),
+    cash_thresholds: Sequence[int] = (15,),
     upc_optimism_factor: float = 1.2,
     upc_growth_start_year: int = 2019,
     upc_growth_end_year: int = 2026,
@@ -451,13 +589,22 @@ def run_eps_montecarlo(
     params_eps.columns = ["EPS"] + [f"{v}_{stat}" for (v, stat) in params_eps.columns[1:]]
 
     eps_list = baseline["EPS"].dropna().unique().tolist()
-    capmin_map = {eps: 19500.0 for eps in eps_list}
-    if "ASMETSALUD EPS" in capmin_map:
-        capmin_map["ASMETSALUD EPS"] = 17800.0
-    if "EMSSANAR EPS" in capmin_map:
-        capmin_map["EMSSANAR EPS"] = 17800.0
+    capmin_map = _build_capmin_map(eps_list)
     capmin_2025 = pd.DataFrame({"EPS": eps_list})
     capmin_2025["CapMinReq"] = capmin_2025["EPS"].map(capmin_map)
+    mean_reversion_params = _build_mean_reversion_params(hist_df=hist, eps_list=eps_list, recent_years=3)
+    mean_reversion_map: Dict[str, Dict[str, float]] = {}
+    for row in mean_reversion_params.to_dict("records"):
+        mean_reversion_map[str(row["EPS"])] = {
+            "mu_long_g": _safe_float(row.get("mu_long_g"), 0.0),
+            "mu_recent_g": _safe_float(row.get("mu_recent_g"), 0.0),
+            "sigma_long_g": _safe_float(row.get("sigma_long_g"), 0.0),
+            "lambda_g": _safe_float(row.get("lambda_g"), 0.05),
+            "mu_long_lr": _safe_float(row.get("mu_long_lr"), 0.0),
+            "mu_recent_lr": _safe_float(row.get("mu_recent_lr"), 0.0),
+            "sigma_long_lr": _safe_float(row.get("sigma_long_lr"), 0.0),
+            "lambda_lr": _safe_float(row.get("lambda_lr"), 0.05),
+        }
 
     upc_long = _to_long_year(upc_df.copy(), id_vars=["Regimen", "GrupoEdad"], value_name="UPC")
     upc_long["Regimen"] = upc_long["Regimen"].astype(str).str.strip()
@@ -517,6 +664,22 @@ def run_eps_montecarlo(
             ar_m, ar_s = float(row.AR_mean), float(row.AR_std)
             oer_m, oer_s = float(row.OER_mean), float(row.OER_std)
             rr_m, rr_s = float(row.rho_res_mean), float(row.rho_res_std)
+            mr_cfg = mean_reversion_map.get(eps, {})
+            mu_long_g = _safe_float(mr_cfg.get("mu_long_g"), g_m)
+            mu_recent_g = _safe_float(mr_cfg.get("mu_recent_g"), g_m)
+            sigma_long_g = _safe_float(mr_cfg.get("sigma_long_g"), g_s)
+            lambda_g = float(np.clip(_safe_float(mr_cfg.get("lambda_g"), 0.05), 0.05, 0.25))
+            mu_long_lr = _safe_float(mr_cfg.get("mu_long_lr"), lr_m)
+            mu_recent_lr = _safe_float(mr_cfg.get("mu_recent_lr"), lr_m)
+            sigma_long_lr = _safe_float(mr_cfg.get("sigma_long_lr"), lr_s)
+            lambda_lr = float(np.clip(_safe_float(mr_cfg.get("lambda_lr"), 0.05), 0.05, 0.25))
+
+            g_sigma = sigma_long_g if sigma_long_g > 0 else _safe_float(g_s, 0.0)
+            lr_sigma = sigma_long_lr if sigma_long_lr > 0 else _safe_float(lr_s, 0.0)
+            mean_g = mu_recent_g + g_shift
+            mean_lr = mu_recent_lr + lr_shift
+            target_g = mu_long_g + g_shift
+            target_lr = mu_long_lr + lr_shift
 
             avg_cash_counts = {thr: np.zeros(n_sim, dtype=float) for thr in thresholds}
             avg_cm_count = np.zeros(n_sim, dtype=float)
@@ -526,8 +689,11 @@ def run_eps_montecarlo(
             for year in years_sim:
                 upc_mix_y = upc_dict.get((eps, year), upc_dict.get((eps, year - 1), 0.0))
 
-                g = _rnorm_trunc(rng, g_m + g_shift, g_s, -0.50, 0.50, n_sim)
-                lr = _rnorm_trunc(rng, lr_m + lr_shift, lr_s, 0.01, 2.00, n_sim)
+                mean_g = mean_g + lambda_g * (target_g - mean_g)
+                mean_lr = mean_lr + lambda_lr * (target_lr - mean_lr)
+
+                g = _rnorm_trunc(rng, mean_g, g_sigma, -0.50, 0.50, n_sim)
+                lr = _rnorm_trunc(rng, mean_lr, lr_sigma, 0.01, 2.00, n_sim)
                 ar = _rnorm_trunc(rng, ar_m, ar_s, 0.00, 1.00, n_sim)
                 oer = _rnorm_trunc(rng, oer_m, oer_s, 0.00, 1.00, n_sim)
                 rho_res = _rnorm_trunc(rng, rr_m, rr_s, 0.00, 2.00, n_sim)
@@ -576,6 +742,7 @@ def run_eps_montecarlo(
         "anchor_year": anchor_year,
         "base_eps": base_eps,
         "upc_growth_segments": upc_growth_segments,
+        "mean_reversion_params": mean_reversion_params,
         "scenarios": dict(scenarios),
         "eps_obj": list(eps_obj),
         "prep": prep_diag,
@@ -616,6 +783,81 @@ def compute_market_share_valle(
     out["MarketShare_Valle"] = out["MarketShare_Valle"].fillna(0.0)
     out = out.sort_values("MarketShare_Valle", ascending=False).reset_index(drop=True)
     return out
+
+
+def compute_reclamos_score(
+    reclamos_df: pd.DataFrame,
+    eps_obj: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    eps_obj = list(eps_obj or EPS_OBJ_DEFAULT)
+    universe = pd.DataFrame({"EPS": eps_obj})
+    if reclamos_df.empty:
+        out = universe.copy()
+        out["Tasa_Reclamos_10k"] = np.nan
+        out["Reclamos"] = np.nan
+        out["Score_Reclamos"] = np.nan
+        out["reclamos_imputado"] = True
+        out["motivo_imputacion_reclamos"] = "sin_datos_reclamos"
+        return out
+
+    df = reclamos_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    eps_col = _resolve_column(df, ["EPS"])
+    tasa_col = _resolve_column(
+        df,
+        [
+            "TASA X CADA 10.000 AFILIADOS",
+            "TASA X CADA 10000 AFILIADOS",
+            "TASA CADA 10.000 AFILIADOS",
+            "TASA CADA 10000 AFILIADOS",
+            "TASA",
+        ],
+    )
+    reclamos_col = _resolve_column(df, ["RECLAMOS"])
+    if eps_col is None or tasa_col is None:
+        out = universe.copy()
+        out["Tasa_Reclamos_10k"] = np.nan
+        out["Reclamos"] = np.nan
+        out["Score_Reclamos"] = np.nan
+        out["reclamos_imputado"] = True
+        out["motivo_imputacion_reclamos"] = "columnas_reclamos_incompletas"
+        return out
+
+    work_cols = [eps_col, tasa_col] + ([reclamos_col] if reclamos_col else [])
+    work = df[work_cols].copy()
+    work["EPS"] = work[eps_col].map(lambda x: _canonicalize_eps_value(x, eps_obj))
+    work["Tasa_Reclamos_10k"] = pd.to_numeric(work[tasa_col], errors="coerce")
+    if reclamos_col:
+        work["Reclamos"] = pd.to_numeric(work[reclamos_col], errors="coerce")
+    else:
+        work["Reclamos"] = np.nan
+
+    work = work[work["EPS"].isin(eps_obj)].copy()
+
+    grouped = (
+        work.groupby("EPS", as_index=False)
+        .agg(
+            Tasa_Reclamos_10k=("Tasa_Reclamos_10k", "mean"),
+            Reclamos=("Reclamos", "sum"),
+        )
+        .reset_index(drop=True)
+    )
+
+    out = universe.merge(grouped, on="EPS", how="left")
+    median_tasa = pd.to_numeric(out["Tasa_Reclamos_10k"], errors="coerce").median()
+    if pd.isna(median_tasa):
+        median_tasa = 0.0
+
+    out["reclamos_imputado"] = out["Tasa_Reclamos_10k"].isna()
+    out["motivo_imputacion_reclamos"] = np.where(
+        out["reclamos_imputado"],
+        "sin_tasa_reclamos",
+        "",
+    )
+    out["Tasa_Reclamos_10k"] = out["Tasa_Reclamos_10k"].fillna(float(median_tasa))
+    out["Score_Reclamos"] = _percentile_score_low_is_better(out["Tasa_Reclamos_10k"])
+    return out.sort_values("EPS").reset_index(drop=True)
 
 
 def impute_missing_probabilities(
@@ -682,9 +924,18 @@ def score_risk_percentiles(
 def build_composite_ranking(
     scored_df: pd.DataFrame,
     market_share_df: pd.DataFrame,
-    risk_weight: float = 0.8,
+    reclamos_score_df: pd.DataFrame | None = None,
+    risk_weight: float = 0.6,
     market_weight: float = 0.2,
+    complaints_weight: float = 0.2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    total_weight = float(risk_weight) + float(market_weight) + float(complaints_weight)
+    if not np.isclose(total_weight, 1.0, atol=1e-9):
+        raise ValueError(
+            "La suma de pesos debe ser 1.0 "
+            f"(risk_weight + market_weight + complaints_weight = {total_weight})."
+        )
+
     out = scored_df.merge(
         market_share_df[["EPS", "MarketShare_Valle", "Afiliados_Valle"]],
         on="EPS",
@@ -700,7 +951,51 @@ def build_composite_ranking(
     )
     out = out.merge(market_scores[["EPS", "Score_Mercado"]], on="EPS", how="left")
 
-    out["Score_Final"] = risk_weight * out["Score_Riesgo"] + market_weight * out["Score_Mercado"]
+    if reclamos_score_df is None:
+        reclamos_cols = [
+            "EPS",
+            "Tasa_Reclamos_10k",
+            "Reclamos",
+            "Score_Reclamos",
+            "reclamos_imputado",
+            "motivo_imputacion_reclamos",
+        ]
+        reclamos_scores = pd.DataFrame({"EPS": out["EPS"].drop_duplicates()})
+        reclamos_scores["Tasa_Reclamos_10k"] = np.nan
+        reclamos_scores["Reclamos"] = np.nan
+        reclamos_scores["Score_Reclamos"] = 0.0
+        reclamos_scores["reclamos_imputado"] = True
+        reclamos_scores["motivo_imputacion_reclamos"] = "reclamos_score_df_no_provisto"
+        reclamos_scores = reclamos_scores[reclamos_cols]
+    else:
+        reclamos_scores = reclamos_score_df[
+            [
+                "EPS",
+                "Tasa_Reclamos_10k",
+                "Reclamos",
+                "Score_Reclamos",
+                "reclamos_imputado",
+                "motivo_imputacion_reclamos",
+            ]
+        ].copy()
+        reclamos_scores["Score_Reclamos"] = pd.to_numeric(
+            reclamos_scores["Score_Reclamos"], errors="coerce"
+        ).fillna(0.0)
+        reclamos_scores["reclamos_imputado"] = reclamos_scores["reclamos_imputado"].fillna(True)
+        reclamos_scores["motivo_imputacion_reclamos"] = (
+            reclamos_scores["motivo_imputacion_reclamos"].fillna("")
+        )
+
+    out = out.merge(reclamos_scores, on="EPS", how="left")
+    out["Score_Reclamos"] = pd.to_numeric(out["Score_Reclamos"], errors="coerce").fillna(0.0)
+    out["reclamos_imputado"] = out["reclamos_imputado"].fillna(True)
+    out["motivo_imputacion_reclamos"] = out["motivo_imputacion_reclamos"].fillna("")
+
+    out["Score_Final"] = (
+        risk_weight * out["Score_Riesgo"]
+        + market_weight * out["Score_Mercado"]
+        + complaints_weight * out["Score_Reclamos"]
+    )
     out["Ranking_Escenario_Final"] = (
         out.groupby("Escenario")["Score_Final"].rank(method="dense", ascending=False).astype(int)
     )
@@ -714,9 +1009,13 @@ def build_composite_ranking(
             Score_Final=("Score_Final", "mean"),
             Score_Riesgo=("Score_Riesgo", "mean"),
             Score_Mercado=("Score_Mercado", "mean"),
+            Score_Reclamos=("Score_Reclamos", "mean"),
             MarketShare_Valle=("MarketShare_Valle", "mean"),
             Afiliados_Valle=("Afiliados_Valle", "mean"),
+            Tasa_Reclamos_10k=("Tasa_Reclamos_10k", "mean"),
+            Reclamos=("Reclamos", "mean"),
             prob_imputada=("prob_imputada", "max"),
+            reclamos_imputado=("reclamos_imputado", "max"),
         )
         .sort_values("Score_Final", ascending=False)
         .reset_index(drop=True)
@@ -736,7 +1035,9 @@ def build_income_statement_view(
     work = df[df["EPS"] == eps_name].copy()
     if work.empty:
         return pd.DataFrame()
-    work = work.sort_values("Año").reset_index(drop=True)
+
+    year_col = _resolve_year_column(work)
+    work = work.sort_values(year_col).reset_index(drop=True)
 
     ingresos = _numeric_series(work, ["TotalIngresoOperativo", "Ingresosnetosporventas"])
     costo = _numeric_series(work, ["Otroscostospornaturaleza"], default=0.0).fillna(0.0)
@@ -756,15 +1057,15 @@ def build_income_statement_view(
     utilidad = _numeric_series(
         work,
         [
-            "Ganancia(Pérdida)Neta",
-            "Gananciasdespuésdeimpuestos",
-            "GananciaoPérdidadelPeriodo",
+            "Ganancia(P??rdida)Neta",
+            "Gananciasdespu??sdeimpuestos",
+            "GananciaoP??rdidadelPeriodo",
         ],
     )
 
     out = pd.DataFrame(
         {
-            "Año": work["Año"].astype(int),
+            "A??o": work[year_col].astype(int),
             "Ingresos": ingresos.astype(float),
             "OPEX_caja": opex_cash.astype(float),
             "EBITDA": ebitda.astype(float),
@@ -778,4 +1079,46 @@ def build_income_statement_view(
         out["Utilidad_Neta"].to_numpy(dtype=float),
         out["Ingresos"].to_numpy(dtype=float),
     )
+    return out
+
+
+def build_eps_historical_compliance(
+    base_eps: pd.DataFrame,
+    eps_name: str,
+) -> pd.DataFrame:
+    df = base_eps.copy()
+    work = df[df["EPS"] == eps_name].copy()
+    if work.empty:
+        return pd.DataFrame()
+
+    year_col = _resolve_year_column(work)
+    work = work.sort_values(year_col).reset_index(drop=True)
+    ingresos = _numeric_series(work, ["TotalIngresoOperativo", "Ingresosnetosporventas"])
+    costo = _numeric_series(work, ["Otroscostospornaturaleza"])
+    lr = _safe_div(costo.to_numpy(dtype=float), ingresos.to_numpy(dtype=float))
+    equity = _numeric_series(work, ["Totaldepatrimonio"])
+    cash = _numeric_series(work, ["EfectivooEquivalentes"], default=0.0).fillna(0.0)
+    inv = _numeric_series(work, ["Activosfinancierosdecortoplazo"], default=0.0).fillna(0.0)
+    reservas = _numeric_series(work, ["Provisionesparaotrospasivosygastos"])
+
+    capmin_map = _build_capmin_map(df["EPS"].dropna().astype(str).unique().tolist())
+    capmin_req = float(capmin_map.get(eps_name, 19500.0))
+
+    cm_ratio = _safe_div(equity.to_numpy(dtype=float), np.full(len(work), capmin_req, dtype=float))
+    pa_req = 0.08 * ingresos.to_numpy(dtype=float) * lr
+    pa_ratio = _safe_div(equity.to_numpy(dtype=float), pa_req)
+    ri_ratio = _safe_div((cash + inv).to_numpy(dtype=float), reservas.to_numpy(dtype=float))
+
+    out = pd.DataFrame(
+        {
+            "A??o": work[year_col].astype(int),
+            "CM_ratio": cm_ratio,
+            "PA_ratio": pa_ratio,
+            "RI_ratio": ri_ratio,
+        }
+    )
+    out["Cumple_CM"] = pd.Series(out["CM_ratio"] >= 1.0, index=out.index).fillna(False)
+    out["Cumple_PA"] = pd.Series(out["PA_ratio"] >= 1.0, index=out.index).fillna(False)
+    out["Cumple_RI"] = pd.Series(out["RI_ratio"] >= 1.0, index=out.index).fillna(False)
+    out["Cumple_3_de_3"] = out["Cumple_CM"] & out["Cumple_PA"] & out["Cumple_RI"]
     return out

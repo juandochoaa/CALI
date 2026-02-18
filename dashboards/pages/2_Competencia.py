@@ -43,6 +43,7 @@ from src.models.eps_scoring import (
     score_ratios,
     winsorize_ratios,
 )
+from src.models.ips_kpis import build_ips_historical_kpis
 
 st.set_page_config(page_title="Competencia", layout="wide")
 apply_theme()
@@ -1119,6 +1120,57 @@ with tab_ips:
     )
 
     if ips_view == "Cuantitativo":
+        section_header("KPI historicos clave", "Margen bruto, margen neto y tamaño de mercado")
+        explain_box(
+            "Como se calcula",
+            [
+                "Margen bruto y margen neto se toman de la serie historica de ratios.",
+                "Tamaño de mercado = Ingreso IPS / Ingreso total IPS por año.",
+                "Vista ejecutiva de tendencia anual, sin tabla de cumplimiento.",
+            ],
+        )
+        ips_kpis = build_ips_historical_kpis(
+            ratios_df=ratios_df,
+            ing_oper_df=ing_oper_df,
+            selected_ips=selected_ips,
+            years_universe=[int(y) for y in year_cols],
+        )
+        if ips_kpis.empty:
+            st.info("No hay datos suficientes para construir KPI historicos de la IPS seleccionada.")
+        else:
+            st.dataframe(
+                ips_kpis.style.format(
+                    {
+                        "MargenBruto": "{:.2%}",
+                        "MargenNeto": "{:.2%}",
+                        "TamanioMercado": "{:.2%}",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            plot_df = ips_kpis.rename(columns={"Año": "Ano"}).copy()
+            plot_long = plot_df.melt(
+                id_vars=["Ano"],
+                value_vars=["MargenBruto", "MargenNeto", "TamanioMercado"],
+                var_name="KPI",
+                value_name="Valor",
+            ).dropna(subset=["Valor"])
+            if not plot_long.empty:
+                fig = px.line(
+                    plot_long,
+                    x="Ano",
+                    y="Valor",
+                    color="KPI",
+                    markers=True,
+                    title="KPI historicos de la IPS seleccionada",
+                    labels={"Ano": "Año", "Valor": "Valor"},
+                )
+                fig.update_layout(yaxis_tickformat=".0%")
+                fig = style_chart(fig)
+                chart_container(fig)
+
+        divider()
         section_header("Bloques financieros", "Cuentas usadas y valores por ano")
         explain_box(
             "Como se calcula",
