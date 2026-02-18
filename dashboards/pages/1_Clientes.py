@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import re
+import inspect
 import sys
 import unicodedata
 from pathlib import Path
@@ -161,6 +162,176 @@ def risk_bucket(score: float | None) -> str:
     if score >= 50:
         return "Riesgo medio"
     return "Alto riesgo"
+
+
+def percentile_score(values: pd.Series, low_is_better: bool) -> pd.Series:
+    data = pd.to_numeric(values, errors="coerce")
+    out = pd.Series(np.nan, index=values.index, dtype=float)
+    valid = data.dropna()
+    n = len(valid)
+    if n == 0:
+        return out
+    if n == 1:
+        out.loc[valid.index] = 100.0
+        return out
+    rank = valid.rank(method="average", ascending=True) - 1.0
+    if low_is_better:
+        score = (1.0 - (rank / (n - 1.0))) * 100.0
+    else:
+        score = (rank / (n - 1.0)) * 100.0
+    out.loc[valid.index] = score
+    return out
+
+
+def build_composite_ranking_local(
+    base_df: pd.DataFrame,
+    market_share_df: pd.DataFrame,
+    reclamos_score_df: pd.DataFrame,
+    cxp_score_df: pd.DataFrame,
+    risk_weight: float,
+    market_weight: float,
+    complaints_weight: float,
+    cxp_rev_weight: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    out = base_df.copy()
+
+    drop_cols = [
+        "MarketShare_Valle",
+        "Afiliados_Valle",
+        "Score_Mercado",
+        "Tasa_Reclamos_10k",
+        "Reclamos",
+        "Score_Reclamos",
+        "reclamos_imputado",
+        "motivo_imputacion_reclamos",
+        "CxP_Comercial",
+        "Ingresos",
+        "CxP_over_REV",
+        "Score_CxP_REV",
+        "cxp_rev_imputado",
+        "motivo_imputacion_cxp_rev",
+        "Score_Final",
+        "Ranking_Escenario_Final",
+    ]
+    existing_drop = [c for c in drop_cols if c in out.columns]
+    if existing_drop:
+        out = out.drop(columns=existing_drop)
+
+    market_cols = ["EPS", "MarketShare_Valle", "Afiliados_Valle"]
+    market_base = market_share_df[[c for c in market_cols if c in market_share_df.columns]].copy()
+    market_base = market_base.drop_duplicates(subset=["EPS"], keep="last")
+    if "MarketShare_Valle" not in market_base.columns:
+        market_base["MarketShare_Valle"] = 0.0
+    if "Afiliados_Valle" not in market_base.columns:
+        market_base["Afiliados_Valle"] = 0.0
+    market_base["Score_Mercado"] = percentile_score(
+        market_base["MarketShare_Valle"], low_is_better=False
+    )
+
+    reclamos_cols = [
+        "EPS",
+        "Tasa_Reclamos_10k",
+        "Reclamos",
+        "Score_Reclamos",
+        "reclamos_imputado",
+        "motivo_imputacion_reclamos",
+    ]
+    reclamos_base = reclamos_score_df[
+        [c for c in reclamos_cols if c in reclamos_score_df.columns]
+    ].drop_duplicates(subset=["EPS"], keep="last")
+    for col in reclamos_cols:
+        if col not in reclamos_base.columns:
+            if col in {"Score_Reclamos", "Tasa_Reclamos_10k", "Reclamos"}:
+                reclamos_base[col] = np.nan
+            elif col == "reclamos_imputado":
+                reclamos_base[col] = True
+            else:
+                reclamos_base[col] = ""
+
+    cxp_cols = [
+        "EPS",
+        "CxP_Comercial",
+        "Ingresos",
+        "CxP_over_REV",
+        "Score_CxP_REV",
+        "cxp_rev_imputado",
+        "motivo_imputacion_cxp_rev",
+    ]
+    cxp_base = cxp_score_df[
+        [c for c in cxp_cols if c in cxp_score_df.columns]
+    ].drop_duplicates(subset=["EPS"], keep="last")
+    for col in cxp_cols:
+        if col not in cxp_base.columns:
+            if col in {"CxP_Comercial", "Ingresos", "CxP_over_REV", "Score_CxP_REV"}:
+                cxp_base[col] = np.nan
+            elif col == "cxp_rev_imputado":
+                cxp_base[col] = True
+            else:
+                cxp_base[col] = ""
+
+    out = out.merge(market_base, on="EPS", how="left")
+    out = out.merge(reclamos_base, on="EPS", how="left")
+    out = out.merge(cxp_base, on="EPS", how="left")
+
+    if "Score_Riesgo" not in out.columns:
+        out["Score_Riesgo"] = np.nan
+    if "prob_imputada" not in out.columns:
+        out["prob_imputada"] = False
+    if "motivo_imputacion" not in out.columns:
+        out["motivo_imputacion"] = ""
+
+    out["Score_Riesgo"] = pd.to_numeric(out["Score_Riesgo"], errors="coerce").fillna(0.0)
+    out["Score_Mercado"] = pd.to_numeric(out["Score_Mercado"], errors="coerce").fillna(0.0)
+    out["Score_Reclamos"] = pd.to_numeric(out["Score_Reclamos"], errors="coerce").fillna(0.0)
+    out["Score_CxP_REV"] = pd.to_numeric(out["Score_CxP_REV"], errors="coerce").fillna(0.0)
+    out["MarketShare_Valle"] = pd.to_numeric(out["MarketShare_Valle"], errors="coerce").fillna(0.0)
+    out["Afiliados_Valle"] = pd.to_numeric(out["Afiliados_Valle"], errors="coerce").fillna(0.0)
+    out["reclamos_imputado"] = out["reclamos_imputado"].fillna(True)
+    out["cxp_rev_imputado"] = out["cxp_rev_imputado"].fillna(True)
+    out["motivo_imputacion_reclamos"] = out["motivo_imputacion_reclamos"].fillna("")
+    out["motivo_imputacion_cxp_rev"] = out["motivo_imputacion_cxp_rev"].fillna("")
+
+    out["Score_Final"] = (
+        risk_weight * out["Score_Riesgo"]
+        + market_weight * out["Score_Mercado"]
+        + complaints_weight * out["Score_Reclamos"]
+        + cxp_rev_weight * out["Score_CxP_REV"]
+    )
+    out["Ranking_Escenario_Final"] = (
+        out.groupby("Escenario")["Score_Final"].rank(method="dense", ascending=False).astype(int)
+    )
+    ranking_escenario = out.sort_values(
+        ["Escenario", "Ranking_Escenario_Final", "EPS"]
+    ).reset_index(drop=True)
+
+    ranking_global = (
+        out.groupby("EPS", as_index=False)
+        .agg(
+            Score_Final=("Score_Final", "mean"),
+            Score_Riesgo=("Score_Riesgo", "mean"),
+            Score_Mercado=("Score_Mercado", "mean"),
+            Score_Reclamos=("Score_Reclamos", "mean"),
+            Score_CxP_REV=("Score_CxP_REV", "mean"),
+            MarketShare_Valle=("MarketShare_Valle", "mean"),
+            Afiliados_Valle=("Afiliados_Valle", "mean"),
+            Tasa_Reclamos_10k=("Tasa_Reclamos_10k", "mean"),
+            Reclamos=("Reclamos", "mean"),
+            CxP_over_REV=("CxP_over_REV", "mean"),
+            CxP_Comercial=("CxP_Comercial", "mean"),
+            prob_imputada=("prob_imputada", "max"),
+            reclamos_imputado=("reclamos_imputado", "max"),
+            cxp_rev_imputado=("cxp_rev_imputado", "max"),
+        )
+        .sort_values("Score_Final", ascending=False)
+        .reset_index(drop=True)
+    )
+    ranking_global["Ranking_Global_Final"] = (
+        ranking_global["Score_Final"].rank(method="dense", ascending=False).astype(int)
+    )
+    ranking_global = ranking_global.sort_values(
+        ["Ranking_Global_Final", "EPS"]
+    ).reset_index(drop=True)
+    return out, ranking_escenario, ranking_global
 
 
 def render_score_methodology() -> None:
@@ -584,8 +755,30 @@ def run_clientes_pipeline(
         eps_eeff_df=eps_eeff_df,
         eps_obj=eps_universe,
     )
-    results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
-        scored_df=results_scored,
+    composite_kwargs = {
+        "scored_df": results_scored,
+        "market_share_df": market_share_df,
+        "reclamos_score_df": reclamos_scored_df,
+        "cxp_score_df": cxp_scored_df,
+        "risk_weight": 0.55,
+        "market_weight": 0.05,
+        "complaints_weight": 0.2,
+        "cxp_rev_weight": 0.2,
+    }
+    composite_base = results_scored.copy()
+    try:
+        sig = inspect.signature(build_composite_ranking)
+        supported_kwargs = {
+            key: value for key, value in composite_kwargs.items() if key in sig.parameters
+        }
+        built_out = build_composite_ranking(**supported_kwargs)
+        if isinstance(built_out, tuple) and len(built_out) >= 1 and isinstance(built_out[0], pd.DataFrame):
+            composite_base = built_out[0].copy()
+    except Exception:
+        composite_base = results_scored.copy()
+
+    results_ranked, ranking_escenario, ranking_global = build_composite_ranking_local(
+        base_df=composite_base,
         market_share_df=market_share_df,
         reclamos_score_df=reclamos_scored_df,
         cxp_score_df=cxp_scored_df,
