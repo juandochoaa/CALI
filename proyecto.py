@@ -33,7 +33,6 @@ EPS_OBJ = [
     "FERRONALES - EAS",
     "MALLAMAS EPSI",
     "NUEVA EPS",
-    "REGIMEN DE EXCEPCION",
     "SALUD TOTAL EPS",
 ]
 

@@ -55,6 +55,10 @@ def normalize_account(text: object) -> str:
     return " ".join(normalized.lower().split())
 
 
+def get_eps_universe() -> list[str]:
+    return [eps for eps in EPS_OBJ_DEFAULT if "excepcion" not in normalize_account(eps)]
+
+
 def normalize_sheet_name(text: object) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_account(text))
 
@@ -115,7 +119,7 @@ def render_score_methodology() -> None:
         st.markdown(f"<div style='height:{px}px'></div>", unsafe_allow_html=True)
 
     section_header("Metodologia del Score EPS", "Modelo unificado con riesgo, mercado y reclamos")
-    st.markdown("**1) Riesgo Monte Carlo (50%)**")
+    st.markdown("**1) Riesgo Monte Carlo (55%)**")
     st.latex(
         r"P_{avg,m}=\frac{1}{N_{sim}}\sum_{s=1}^{N_{sim}}\left(\frac{1}{T}\sum_{t=1}^{T}\mathbf{1}[incumple_{m,s,t}]\right)"
     )
@@ -123,7 +127,7 @@ def render_score_methodology() -> None:
     st.latex(r"Score_{Riesgo}=\frac{1}{M}\sum_{m=1}^{M}Percentil_{inv}(P_{avg,m})")
 
     divider()
-    st.markdown("**2) Mercado Valle (20%)**")
+    st.markdown("**2) Mercado Valle (5%)**")
     st.latex(r"MarketShare_{EPS}=\frac{Afiliados_{EPS,Valle}}{\sum_j Afiliados_{j,Valle}}")
     formula_gap(20)
     st.latex(r"Score_{Mercado}=Percentil_{dir}(MarketShare_{EPS})")
@@ -137,7 +141,7 @@ def render_score_methodology() -> None:
     st.latex(r"Score_{Reclamos}=Percentil_{inv}(Tasa_{10k,EPS})")
 
     divider()
-    st.markdown("**4) CxP comerciales / Ingresos (10%)**")
+    st.markdown("**4) CxP comerciales / Ingresos (20%)**")
     st.latex(
         r"CxP\_over\_REV_{EPS}=\frac{CuentasPorPagarComerciales_{EPS}}{IngresosTotales_{EPS}}"
     )
@@ -147,7 +151,7 @@ def render_score_methodology() -> None:
     divider()
     st.markdown("**Score final ponderado**")
     st.latex(
-        r"Score_{Final}=0.50\cdot Score_{Riesgo}+0.20\cdot Score_{Mercado}+0.20\cdot Score_{Reclamos}+0.10\cdot Score_{CxP/REV}"
+        r"Score_{Final}=0.55\cdot Score_{Riesgo}+0.05\cdot Score_{Mercado}+0.20\cdot Score_{Reclamos}+0.20\cdot Score_{CxP/REV}"
     )
 
     formulas_df = pd.DataFrame(
@@ -159,7 +163,7 @@ def render_score_methodology() -> None:
             {"Variable": "Score_Reclamos", "Definicion": "Percentil invertido de la tasa de reclamos (menor tasa = mejor)."},
             {"Variable": "CxP_over_REV", "Definicion": "Cuentas por pagar comerciales sobre ingresos totales (menor = mejor)."},
             {"Variable": "Score_CxP_REV", "Definicion": "Percentil invertido de CxP_over_REV."},
-            {"Variable": "Score_Final", "Definicion": "Combinacion ponderada 50/20/20/10 de riesgo, mercado, reclamos y CxP/REV."},
+            {"Variable": "Score_Final", "Definicion": "Combinacion ponderada 55/5/20/20 de riesgo, mercado, reclamos y CxP/REV."},
         ]
     )
     st.dataframe(formulas_df, width="stretch", hide_index=True)
@@ -177,12 +181,15 @@ def render_score_methodology() -> None:
     st.markdown("**1) Variables estocasticas por ano y simulacion**")
     st.markdown(
         (
-            "Se simulan 5 drivers: crecimiento de afiliados `g`, loss ratio `LR`, admin ratio `AR`, "
-            "otros gastos operativos `OER` y ratio de reservas `rho_res`."
+            "Se simulan 5 drivers financieros: crecimiento de afiliados `g`, loss ratio `LR`, "
+            "admin ratio `AR`, otros gastos operativos `OER` y ratio de reservas `rho_res`."
         )
     )
     st.latex(r"X_{k,s,t}=\mathrm{clip}\left(\mathcal{N}\left(\mu_k+\Delta_k,\sigma_k\right),L_k,U_k\right)")
     st.markdown("Donde `k in {g, LR, AR, OER, rho_res}`.")
+    st.markdown(
+        "Para la metrica de dias de pago se simula adicionalmente `CxP_ratio` (cuentas por pagar/ingresos)."
+    )
     st.latex(r"\Delta_g=g_{shift}^{escenario},\qquad \Delta_{LR}=LR_{shift}^{escenario}")
     st.markdown(
         (
@@ -484,6 +491,7 @@ def run_clientes_pipeline(
     pd.DataFrame,
     Dict[str, Dict[str, float]],
 ]:
+    eps_universe = get_eps_universe()
     scenarios = {
         "BASE": {"LR_shift": base_lr_shift, "g_shift": base_g_shift},
         "STRESS_LR": {"LR_shift": stress_lr_shift, "g_shift": stress_lr_g_shift},
@@ -495,7 +503,7 @@ def run_clientes_pipeline(
         eps_eeff_df=eps_eeff_df,
         eps_edad_df=eps_edad_df,
         eps_afiliados_hist_df=eps_anos_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_obj=eps_universe,
         n_sim=n_sim,
         horizon_end=horizon_end,
         cash_thresholds=(15,),
@@ -507,11 +515,11 @@ def run_clientes_pipeline(
     )
     market_share_df = compute_market_share_valle(
         eps_afiliados_df=eps_afiliados_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_obj=eps_universe,
     )
     results_imputed = impute_missing_probabilities(
         results_df=results_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_obj=eps_universe,
         scenarios=list(scenarios.keys()),
         probability_columns=PROBABILITY_COLUMNS,
     )
@@ -521,21 +529,21 @@ def run_clientes_pipeline(
     )
     reclamos_scored_df = compute_reclamos_score(
         reclamos_df=reclamos_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_obj=eps_universe,
     )
     cxp_scored_df = compute_cxp_revenue_score(
         eps_eeff_df=eps_eeff_df,
-        eps_obj=EPS_OBJ_DEFAULT,
+        eps_obj=eps_universe,
     )
     results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
         scored_df=results_scored,
         market_share_df=market_share_df,
         reclamos_score_df=reclamos_scored_df,
         cxp_score_df=cxp_scored_df,
-        risk_weight=0.5,
-        market_weight=0.2,
+        risk_weight=0.55,
+        market_weight=0.05,
         complaints_weight=0.2,
-        cxp_rev_weight=0.1,
+        cxp_rev_weight=0.2,
     )
     return (
         diagnostics,
@@ -600,7 +608,7 @@ with st.sidebar:
         stress_mix_g_shift = float(st.number_input("STRESS_MIX g shift", value=-0.03, step=0.01, format="%.2f"))
 
     st.caption(
-        "Score final: 50% riesgo Monte Carlo + 20% mercado Valle + 20% reclamos + 10% CxP/Ingresos."
+        "Score final: 55% riesgo Monte Carlo + 5% mercado Valle + 20% reclamos + 20% CxP/Ingresos."
     )
 
 render_score_methodology()
@@ -659,7 +667,7 @@ with st.spinner("Ejecutando simulacion Monte Carlo..."):
         ranking_escenario,
         ranking_global,
         scenarios,
-    ) = run_clientes_pipeline(
+) = run_clientes_pipeline(
         eps_eeff_df=eps_eeff_df,
         upc_df=upc_df,
         eps_edad_df=eps_edad_df,
@@ -678,6 +686,14 @@ with st.spinner("Ejecutando simulacion Monte Carlo..."):
         stress_mix_lr_shift=stress_mix_lr_shift,
         stress_mix_g_shift=stress_mix_g_shift,
     )
+
+eps_universe = get_eps_universe()
+results_ranked = results_ranked[results_ranked["EPS"].isin(eps_universe)].copy()
+ranking_escenario = ranking_escenario[ranking_escenario["EPS"].isin(eps_universe)].copy()
+ranking_global = ranking_global[ranking_global["EPS"].isin(eps_universe)].copy()
+market_share_df = market_share_df[market_share_df["EPS"].isin(eps_universe)].copy()
+reclamos_scored_df = reclamos_scored_df[reclamos_scored_df["EPS"].isin(eps_universe)].copy()
+cxp_scored_df = cxp_scored_df[cxp_scored_df["EPS"].isin(eps_universe)].copy()
 
 ranking_global_exec = ranking_global.copy()
 ranking_global_exec["Riesgo"] = ranking_global_exec["Score_Final"].map(risk_bucket)
@@ -802,7 +818,7 @@ with tab_analisis:
     divider()
     section_header(
         "Ranking por escenario",
-        "Score final = 50% riesgo + 20% mercado + 20% reclamos + 10% CxP/Ingresos",
+        "Score final = 55% riesgo + 5% mercado + 20% reclamos + 20% CxP/Ingresos",
     )
     st.dataframe(
         ranking_exec[
@@ -1031,7 +1047,7 @@ with tab_eps:
     section_header("Analisis EPS", "Vista unica: estado de resultados + probabilidades")
     selected_eps = st.selectbox(
         "EPS",
-        EPS_OBJ_DEFAULT,
+        eps_universe,
         index=0,
         format_func=lambda x: str(x).upper(),
     )

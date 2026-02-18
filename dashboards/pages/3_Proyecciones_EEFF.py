@@ -705,6 +705,118 @@ def selector_escenario_tarifas(
     return parse_tarifas_escenarios(tarifas_esc_df, scenario), None
 
 
+def build_service_projection_from_tariffs(
+    tariffs_serv: pd.DataFrame,
+    objetivo_valle: float,
+    growth_rate: float,
+    proj_years: list[int],
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+    warnings: list[str] = []
+    if tariffs_serv.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), warnings
+
+    tariffs = tariffs_serv.copy()
+    tariffs["PctPacientes"] = pd.to_numeric(tariffs.get("PctPacientes"), errors="coerce")
+    tariffs["Pacientes"] = pd.to_numeric(tariffs.get("Pacientes"), errors="coerce")
+    tariffs["PacientesValle"] = pd.to_numeric(tariffs.get("PacientesValle"), errors="coerce")
+    tariffs["RatioIntervenciones"] = pd.to_numeric(
+        tariffs.get("RatioIntervenciones"), errors="coerce"
+    )
+    tariffs["IntervencionesRaw"] = pd.to_numeric(
+        tariffs.get("IntervencionesRaw"), errors="coerce"
+    )
+    tariffs["TarifaPromedio"] = pd.to_numeric(tariffs.get("TarifaPromedio"), errors="coerce")
+
+    if tariffs["PctPacientes"].isna().all():
+        warnings.append(
+            "No se pudo calcular el % de pacientes del escenario; se reparte en partes iguales."
+        )
+        tariffs["PctPacientes"] = 1 / len(tariffs) if len(tariffs) else np.nan
+    else:
+        tariffs["PctPacientes"] = tariffs["PctPacientes"].fillna(0.0)
+        total_mix = tariffs["PctPacientes"].sum()
+        if total_mix and total_mix > 0:
+            tariffs["PctPacientes"] = tariffs["PctPacientes"] / total_mix
+
+    # Año 1: usar primero pacientes de la hoja (Valle), luego pacientes base, y
+    # solo si faltan datos completar con objetivo x mix.
+    if tariffs["PacientesValle"].notna().any() or tariffs["Pacientes"].notna().any():
+        tariffs["Pacientes_Ano1"] = tariffs["PacientesValle"]
+        missing_pac = tariffs["Pacientes_Ano1"].isna()
+        if missing_pac.any():
+            tariffs.loc[missing_pac, "Pacientes_Ano1"] = tariffs.loc[missing_pac, "Pacientes"]
+        missing_pac = tariffs["Pacientes_Ano1"].isna()
+        if missing_pac.any():
+            tariffs.loc[missing_pac, "Pacientes_Ano1"] = (
+                float(objetivo_valle) * tariffs.loc[missing_pac, "PctPacientes"]
+            )
+    else:
+        tariffs["Pacientes_Ano1"] = float(objetivo_valle) * tariffs["PctPacientes"]
+
+    total_year1 = pd.to_numeric(
+        tariffs["Pacientes_Ano1"], errors="coerce"
+    ).sum(min_count=1)
+    if pd.notna(total_year1) and total_year1 > 0:
+        tariffs["PctPacientes"] = (
+            pd.to_numeric(tariffs["Pacientes_Ano1"], errors="coerce") / float(total_year1)
+        )
+
+    ratio_fallback = np.divide(
+        tariffs["IntervencionesRaw"].to_numpy(dtype=float),
+        pd.to_numeric(tariffs["Pacientes_Ano1"], errors="coerce").to_numpy(dtype=float),
+        out=np.full(len(tariffs), np.nan, dtype=float),
+        where=(
+            pd.to_numeric(tariffs["Pacientes_Ano1"], errors="coerce").to_numpy(dtype=float)
+            > 0
+        ),
+    )
+    missing_ratio = tariffs["RatioIntervenciones"].isna()
+    if missing_ratio.any():
+        tariffs.loc[missing_ratio, "RatioIntervenciones"] = ratio_fallback[missing_ratio]
+    if tariffs["RatioIntervenciones"].isna().any():
+        warnings.append(
+            "Hay servicios sin RatioIntervenciones; las intervenciones y ventas de esos servicios quedan en NA."
+        )
+
+    tariffs["Intervenciones_Ano1"] = tariffs["Pacientes_Ano1"] * tariffs["RatioIntervenciones"]
+    tariffs["Ventas_Ano1"] = tariffs["Intervenciones_Ano1"] * tariffs["TarifaPromedio"]
+
+    safe_growth = float(growth_rate) if np.isfinite(growth_rate) else 0.0
+    if not proj_years:
+        return tariffs, pd.DataFrame(), pd.DataFrame(), warnings
+
+    start_year = int(proj_years[0])
+    total_year1_safe = float(total_year1) if pd.notna(total_year1) else 0.0
+
+    service_rows = []
+    for year in proj_years:
+        if int(year) == start_year:
+            patients_by_service = tariffs["Pacientes_Ano1"]
+        else:
+            total_year = total_year1_safe * (1 + safe_growth) ** (int(year) - start_year)
+            patients_by_service = total_year * tariffs["PctPacientes"]
+        interventions = patients_by_service * tariffs["RatioIntervenciones"]
+        sales = interventions * tariffs["TarifaPromedio"]
+        for idx, svc in enumerate(tariffs["ServicioTarifa"]):
+            service_rows.append(
+                {
+                    "Servicio": svc,
+                    "Ano": int(year),
+                    "Pacientes": patients_by_service.iloc[idx],
+                    "Intervenciones": interventions.iloc[idx],
+                    "Ventas": sales.iloc[idx],
+                }
+            )
+
+    service_proj = pd.DataFrame(service_rows)
+    proj_totals = (
+        service_proj.groupby("Ano")[["Pacientes", "Intervenciones", "Ventas"]]
+        .sum()
+        .reset_index()
+    )
+    return tariffs, service_proj, proj_totals, warnings
+
+
 def build_tarifa_table(
     df: pd.DataFrame,
     sede_col: str,
@@ -1600,9 +1712,7 @@ with tab_eeff:
                 ratio_df["Promedio"] = ratio_df.mean(axis=1, skipna=True)
 
     has_proj_kpi = False
-    if proj.empty:
-        pass
-    else:
+    if not proj.empty:
         required_cols = {
             "year",
             "revenue_cop_bn",
@@ -1611,77 +1721,63 @@ with tab_eeff:
             "cashflow_cop_bn",
             "capex_cop_bn",
         }
-        if not required_cols.issubset(set(proj.columns)):
-            st.warning("La hoja de proyecciones no tiene las columnas requeridas.")
+        if required_cols.issubset(set(proj.columns)):
+            with st.expander("Referencia externa: proyecciones.xlsx", expanded=False):
+                st.info(
+                    "Esta referencia es externa y puede diferir de las proyecciones por escenario "
+                    "calculadas con Tarifas_Escenarios que se muestran abajo."
+                )
+                section_header("KPIs financieros (referencia externa)")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("EBITDA 2030", f"{proj.loc[proj['year'] == 2030, 'ebitda_cop_bn'].iat[0]:.1f} bn")
+                col2.metric("Margen EBITDA", f"{proj['ebitda_cop_bn'].iloc[-1] / proj['revenue_cop_bn'].iloc[-1]:.0%}")
+                col3.metric("Capex total", f"{proj['capex_cop_bn'].sum():.1f} bn")
+
+                left, right = st.columns([1.1, 0.9])
+                with left:
+                    plot_df = proj.melt(
+                        id_vars="year",
+                        value_vars=["revenue_cop_bn", "costs_cop_bn", "ebitda_cop_bn"],
+                        var_name="metric",
+                        value_name="value",
+                    )
+                    fig = px.line(
+                        plot_df,
+                        x="year",
+                        y="value",
+                        color="metric",
+                        markers=True,
+                        title="Ingresos, costos y EBITDA (COP bn)",
+                    )
+                    fig = style_chart(fig)
+                    chart_container(fig)
+                    st.caption(f"Fuente: {proj_source}")
+
+                with right:
+                    fig = px.bar(
+                        proj,
+                        x="year",
+                        y="cashflow_cop_bn",
+                        title="Flujo de caja (COP bn)",
+                        text="cashflow_cop_bn",
+                    )
+                    fig = style_chart(fig)
+                    chart_container(fig)
+                    st.caption(f"Fuente: {proj_source}")
+
+                money_cols = [
+                    "revenue_cop_bn",
+                    "costs_cop_bn",
+                    "ebitda_cop_bn",
+                    "cashflow_cop_bn",
+                    "capex_cop_bn",
+                ]
+                st.dataframe(
+                    proj.style.format({col: (lambda v: "" if pd.isna(v) else f"${v:,.1f}") for col in money_cols}),
+                    width='stretch',
+                )
         else:
-            has_proj_kpi = True
-            section_header("KPIs financieros")
-            explain_box(
-                "Como se calcula",
-                [
-                    "Fuente: proyecciones.xlsx (si estÃ¡ disponible).",
-                    "KPIs principales: ingresos, costos, EBITDA y flujo de caja.",
-                    "Se muestran mÃ©tricas del aÃ±o 2030 como referencia.",
-                ],
-            )
-
-            col1, col2, col3 = st.columns(3)
-            col1.metric("EBITDA 2030", f"{proj.loc[proj['year'] == 2030, 'ebitda_cop_bn'].iat[0]:.1f} bn")
-            col2.metric("Margen EBITDA", f"{proj['ebitda_cop_bn'].iloc[-1] / proj['revenue_cop_bn'].iloc[-1]:.0%}")
-            col3.metric("Capex total", f"{proj['capex_cop_bn'].sum():.1f} bn")
-
-            left, right = st.columns([1.1, 0.9])
-
-            with left:
-                plot_df = proj.melt(
-                    id_vars="year",
-                    value_vars=["revenue_cop_bn", "costs_cop_bn", "ebitda_cop_bn"],
-                    var_name="metric",
-                    value_name="value",
-                )
-                fig = px.line(
-                    plot_df,
-                    x="year",
-                    y="value",
-                    color="metric",
-                    markers=True,
-                    title="Ingresos, costos y EBITDA (COP bn)",
-                )
-                fig = style_chart(fig)
-                chart_container(fig)
-                st.caption(f"Fuente: {proj_source}")
-
-            with right:
-                fig = px.bar(
-                    proj,
-                    x="year",
-                    y="cashflow_cop_bn",
-                    title="Flujo de caja (COP bn)",
-                    text="cashflow_cop_bn",
-                )
-                fig = style_chart(fig)
-                chart_container(fig)
-                st.caption(f"Fuente: {proj_source}")
-
-            section_header("Detalle anual")
-            explain_box(
-                "Como se calcula",
-                [
-                    "Detalle anual de ingresos, costos, EBITDA, flujo de caja y capex.",
-                    "Cifras en COP billones segÃºn el archivo de proyecciones.",
-                ],
-            )
-            money_cols = [
-                "revenue_cop_bn",
-                "costs_cop_bn",
-                "ebitda_cop_bn",
-                "cashflow_cop_bn",
-                "capex_cop_bn",
-            ]
-            st.dataframe(
-                proj.style.format({col: (lambda v: "" if pd.isna(v) else f"${v:,.1f}") for col in money_cols}),
-                width='stretch',
-            )
+            st.warning("La hoja de proyecciones no tiene las columnas requeridas.")
 
     divider()
     section_header("Ventas AÃ±o 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
@@ -1699,6 +1795,12 @@ with tab_eeff:
         st.warning("No se pudo calcular el objetivo Valle (posibles atendidos).")
     else:
         scenario = st.session_state.get("precio_scenario", PRICE_SCENARIOS[0])
+        proj_years = list(range(2026, 2031))
+        growth_default = growth_avg
+        if pd.isna(growth_default):
+            st.warning("No se pudo calcular crecimiento historico; se asume 0%.")
+            growth_default = 0.0
+        growth_rate = float(growth_default)
 
         tariffs_serv, _ = selector_escenario_tarifas(
             scenario, tarifas_esc_df
@@ -1721,87 +1823,52 @@ with tab_eeff:
         if tariffs_serv.empty:
             st.warning("No se encontraron tarifas para el escenario seleccionado.")
         else:
-            tariffs = tariffs_serv.copy()
-            tariffs["PctPacientes"] = pd.to_numeric(
-                tariffs.get("PctPacientes"), errors="coerce"
-            )
-            tariffs["Pacientes"] = pd.to_numeric(
-                tariffs.get("Pacientes"), errors="coerce"
-            )
-            tariffs["PacientesValle"] = pd.to_numeric(
-                tariffs.get("PacientesValle"), errors="coerce"
-            )
-            tariffs["RatioIntervenciones"] = pd.to_numeric(
-                tariffs.get("RatioIntervenciones"), errors="coerce"
-            )
-            tariffs["IntervencionesRaw"] = pd.to_numeric(
-                tariffs.get("IntervencionesRaw"), errors="coerce"
-            )
-
-            if tariffs["PctPacientes"].isna().all():
-                st.warning(
-                    "No se pudo calcular el % de pacientes del escenario; se reparte en partes iguales."
+            tariffs, service_proj, proj_totals_active, proj_warnings = (
+                build_service_projection_from_tariffs(
+                    tariffs_serv=tariffs_serv,
+                    objetivo_valle=float(objetivo_valle),
+                    growth_rate=growth_rate,
+                    proj_years=proj_years,
                 )
-                tariffs["PctPacientes"] = 1 / len(tariffs) if len(tariffs) else np.nan
+            )
+            for warning_msg in proj_warnings:
+                st.warning(str(warning_msg))
+            if tariffs.empty or service_proj.empty or proj_totals_active.empty:
+                st.warning("No fue posible construir la proyeccion de ingresos para el escenario activo.")
+                st.stop()
             else:
-                tariffs["PctPacientes"] = tariffs["PctPacientes"].fillna(0.0)
-                total_mix = tariffs["PctPacientes"].sum()
-                if total_mix and total_mix > 0:
-                    tariffs["PctPacientes"] = tariffs["PctPacientes"] / total_mix
-
-            # Año 1: usar primero pacientes de la hoja (Valle), luego pacientes base, y
-            # solo si faltan datos completar con objetivo x mix.
-            if tariffs["PacientesValle"].notna().any() or tariffs["Pacientes"].notna().any():
-                tariffs["Pacientes_Ano1"] = tariffs["PacientesValle"]
-                missing_pac = tariffs["Pacientes_Ano1"].isna()
-                if missing_pac.any():
-                    tariffs.loc[missing_pac, "Pacientes_Ano1"] = tariffs.loc[
-                        missing_pac, "Pacientes"
-                    ]
-                missing_pac = tariffs["Pacientes_Ano1"].isna()
-                if missing_pac.any():
-                    tariffs.loc[missing_pac, "Pacientes_Ano1"] = (
-                        objetivo_valle * tariffs.loc[missing_pac, "PctPacientes"]
+                scenario_income_rows: list[dict[str, object]] = []
+                for scenario_name in PRICE_SCENARIOS:
+                    tariffs_sc, _ = selector_escenario_tarifas(scenario_name, tarifas_esc_df)
+                    if tariffs_sc.empty:
+                        continue
+                    _, _, proj_totals_sc, _ = build_service_projection_from_tariffs(
+                        tariffs_serv=tariffs_sc,
+                        objetivo_valle=float(objetivo_valle),
+                        growth_rate=growth_rate,
+                        proj_years=proj_years,
                     )
-            else:
-                tariffs["Pacientes_Ano1"] = objetivo_valle * tariffs["PctPacientes"]
+                    if proj_totals_sc.empty:
+                        continue
+                    revenue_sc = proj_totals_sc.set_index("Ano")["Ventas"].sort_index()
+                    row_sc: dict[str, object] = {"Escenario": scenario_name}
+                    for year_sc in proj_years:
+                        row_sc[year_sc] = float(revenue_sc.get(year_sc, np.nan))
+                    scenario_income_rows.append(row_sc)
 
-            total_year1 = pd.to_numeric(
-                tariffs["Pacientes_Ano1"], errors="coerce"
-            ).sum(min_count=1)
-            if pd.notna(total_year1) and total_year1 > 0:
-                tariffs["PctPacientes"] = (
-                    pd.to_numeric(tariffs["Pacientes_Ano1"], errors="coerce")
-                    / float(total_year1)
-                )
-
-            ratio_fallback = np.divide(
-                tariffs["IntervencionesRaw"].to_numpy(dtype=float),
-                pd.to_numeric(
-                    tariffs["Pacientes_Ano1"], errors="coerce"
-                ).to_numpy(dtype=float),
-                out=np.full(len(tariffs), np.nan, dtype=float),
-                where=(
-                    pd.to_numeric(
-                        tariffs["Pacientes_Ano1"], errors="coerce"
-                    ).to_numpy(dtype=float)
-                    > 0
-                ),
-            )
-            missing_ratio = tariffs["RatioIntervenciones"].isna()
-            if missing_ratio.any():
-                tariffs.loc[missing_ratio, "RatioIntervenciones"] = ratio_fallback[
-                    missing_ratio
-                ]
-            if tariffs["RatioIntervenciones"].isna().any():
-                st.warning(
-                    "Hay servicios sin RatioIntervenciones; las intervenciones y ventas de esos servicios quedan en NA."
-                )
-
-            tariffs["Intervenciones_Ano1"] = (
-                tariffs["Pacientes_Ano1"] * tariffs["RatioIntervenciones"]
-            )
-            tariffs["Ventas_Ano1"] = tariffs["Intervenciones_Ano1"] * tariffs["TarifaPromedio"]
+                if scenario_income_rows:
+                    scenario_income_df = pd.DataFrame(scenario_income_rows)
+                    section_header("Ingresos proyectados por escenario", "Mismo metodo de calculo para todas las tablas")
+                    st.dataframe(
+                        scenario_income_df.style.format(
+                            {year: (lambda v: "" if pd.isna(v) else f"${v:,.0f}") for year in proj_years}
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                    st.caption(
+                        "Los ingresos de todas las tablas de esta seccion se calculan desde estas ventas proyectadas del escenario activo."
+                    )
 
             show_cols = [
                 "ServicioTarifa",
@@ -1855,38 +1922,11 @@ with tab_eeff:
             c_obj1.metric("Objetivo Valle (pacientes)", f"{objetivo_valle:,.0f}")
             c_obj2.metric("Pacientes AÃ±o 1 proyectados", f"{total_year1:,.0f}")
 
-            growth_default = growth_avg
-            if pd.isna(growth_default):
-                st.warning("No se pudo calcular crecimiento historico; se asume 0%.")
-                growth_default = 0.0
-            growth_rate = float(growth_default)
             st.caption(f"Tasa predeterminada aplicada: {growth_default:.2%}.")
             st.caption(
                 f"Crecimiento histÃ³rico calculado: {growth_default:.2%}. "
                 "Esta misma tasa se usa para proyectar desde AÃ±o 2."
             )
-
-            proj_years = list(range(2026, 2031))
-            service_rows = []
-            for year in proj_years:
-                if year == 2026:
-                    patients_by_service = tariffs["Pacientes_Ano1"]
-                else:
-                    total_year = total_year1 * (1 + growth_rate) ** (year - 2026)
-                    patients_by_service = total_year * tariffs["PctPacientes"]
-                interventions = patients_by_service * tariffs["RatioIntervenciones"]
-                sales = interventions * tariffs["TarifaPromedio"]
-                for idx, svc in enumerate(tariffs["ServicioTarifa"]):
-                    service_rows.append(
-                        {
-                            "Servicio": svc,
-                            "Ano": year,
-                            "Pacientes": patients_by_service.iloc[idx],
-                            "Intervenciones": interventions.iloc[idx],
-                            "Ventas": sales.iloc[idx],
-                        }
-                    )
-            service_proj = pd.DataFrame(service_rows)
 
             # tabla completa por servicio (wide)
             def pivot_metric(metric: str) -> pd.DataFrame:
@@ -1916,11 +1956,7 @@ with tab_eeff:
             )
 
             # totales por ano
-            proj_totals = (
-                service_proj.groupby("Ano")[["Pacientes", "Ventas"]]
-                .sum()
-                .reset_index()
-            )
+            proj_totals = proj_totals_active.copy()
             st.session_state["proj_totals"] = proj_totals
             st.session_state["total_year1"] = total_year1
             st.session_state["proj_years"] = proj_years
@@ -2166,6 +2202,45 @@ with tab_eeff:
                         revenue_by_year=revenue_by_year,
                         years=proj_years,
                     )
+                    ingresos_stmt = pd.to_numeric(
+                        proj_statement.loc["INGRESOS", proj_years], errors="coerce"
+                    )
+                    ventas_base = pd.to_numeric(
+                        revenue_by_year.reindex(proj_years), errors="coerce"
+                    )
+                    reconcile_df = pd.DataFrame(
+                        {
+                            "Ano": proj_years,
+                            "Ventas_Proyectadas": ventas_base.to_numpy(dtype=float),
+                            "INGRESOS_EEFF": ingresos_stmt.to_numpy(dtype=float),
+                        }
+                    )
+                    reconcile_df["Diferencia"] = (
+                        reconcile_df["INGRESOS_EEFF"] - reconcile_df["Ventas_Proyectadas"]
+                    )
+                    max_gap = pd.to_numeric(
+                        reconcile_df["Diferencia"], errors="coerce"
+                    ).abs().max()
+                    section_header("Cuadre de ingresos", "Validacion entre tablas de proyeccion")
+                    st.dataframe(
+                        reconcile_df.style.format(
+                            {
+                                "Ventas_Proyectadas": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                                "INGRESOS_EEFF": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                                "Diferencia": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                            }
+                        ),
+                        width="stretch",
+                        hide_index=True,
+                    )
+                    if pd.notna(max_gap) and float(max_gap) <= 1.0:
+                        st.caption("Cuadre OK: INGRESOS_EEFF coincide con Ventas_Proyectadas.")
+                    else:
+                        st.warning(
+                            "Se detecta diferencia entre Ventas_Proyectadas e INGRESOS_EEFF. "
+                            "Revisa tarifas, ratios o datos faltantes en el escenario activo."
+                        )
+
                     proj_table = proj_statement.reset_index().rename(columns={"index": "Cuenta"})
                     year_cols = [c for c in proj_table.columns if isinstance(c, int)]
                     st.dataframe(

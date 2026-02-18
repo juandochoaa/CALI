@@ -18,7 +18,6 @@ EPS_OBJ_DEFAULT: List[str] = [
     "FERRONALES - EAS",
     "MALLAMAS EPSI",
     "NUEVA EPS",
-    "REGIMEN DE EXCEPCION",
     "SALUD TOTAL EPS",
 ]
 
@@ -184,15 +183,18 @@ def _build_eps_eeff_wide(
     eeff_long["EPS"] = eeff_long["EPS"].astype(str).str.strip()
     eeff_long["CUENTA"] = eeff_long["CUENTA"].astype(str).str.strip()
     eeff_long["Valor"] = pd.to_numeric(eeff_long["Valor"], errors="coerce")
+
+    # Resolve year column dynamically to handle encoding variants of year labels.
+    year_col = _resolve_year_column(eeff_long)
     eeff_wide = (
         eeff_long.pivot_table(
-            index=["EPS", "AÃ±o"],
+            index=["EPS", year_col],
             columns="CUENTA",
             values="Valor",
             aggfunc="sum",
         )
         .reset_index()
-        .sort_values(["EPS", "AÃ±o"])
+        .sort_values(["EPS", year_col])
         .reset_index(drop=True)
     )
     return eeff_wide
@@ -1063,10 +1065,10 @@ def build_composite_ranking(
     market_share_df: pd.DataFrame,
     reclamos_score_df: pd.DataFrame | None = None,
     cxp_score_df: pd.DataFrame | None = None,
-    risk_weight: float = 0.6,
-    market_weight: float = 0.2,
+    risk_weight: float = 0.55,
+    market_weight: float = 0.05,
     complaints_weight: float = 0.2,
-    cxp_rev_weight: float = 0.0,
+    cxp_rev_weight: float = 0.2,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     total_weight = (
         float(risk_weight)
