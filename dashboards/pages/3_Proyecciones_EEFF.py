@@ -1725,6 +1725,9 @@ with tab_eeff:
             tariffs["PctPacientes"] = pd.to_numeric(
                 tariffs.get("PctPacientes"), errors="coerce"
             )
+            tariffs["Pacientes"] = pd.to_numeric(
+                tariffs.get("Pacientes"), errors="coerce"
+            )
             tariffs["PacientesValle"] = pd.to_numeric(
                 tariffs.get("PacientesValle"), errors="coerce"
             )
@@ -1746,8 +1749,15 @@ with tab_eeff:
                 if total_mix and total_mix > 0:
                     tariffs["PctPacientes"] = tariffs["PctPacientes"] / total_mix
 
-            if tariffs["PacientesValle"].notna().any():
+            # Año 1: usar primero pacientes de la hoja (Valle), luego pacientes base, y
+            # solo si faltan datos completar con objetivo x mix.
+            if tariffs["PacientesValle"].notna().any() or tariffs["Pacientes"].notna().any():
                 tariffs["Pacientes_Ano1"] = tariffs["PacientesValle"]
+                missing_pac = tariffs["Pacientes_Ano1"].isna()
+                if missing_pac.any():
+                    tariffs.loc[missing_pac, "Pacientes_Ano1"] = tariffs.loc[
+                        missing_pac, "Pacientes"
+                    ]
                 missing_pac = tariffs["Pacientes_Ano1"].isna()
                 if missing_pac.any():
                     tariffs.loc[missing_pac, "Pacientes_Ano1"] = (
@@ -1834,7 +1844,7 @@ with tab_eeff:
             explain_box(
                 "Como se calcula",
                 [
-                    "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
+                    "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES y luego objetivo x mix.",
                     "Desde AÃ±o 2 se mantiene el mix (%Pacientes) del escenario activo.",
                     "Crecimiento anual fijo igual al promedio histÃ³rico de ventas.",
                 ],
