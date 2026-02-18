@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import sys
 from pathlib import Path
@@ -190,14 +190,11 @@ def parse_tarifas_servicios(
     grouped["ServicioTarifa"] = grouped["ServicioTarifa"].astype(str).str.upper().str.strip()
     total_pac = grouped["Pacientes"].sum()
     grouped["PctPacientes"] = grouped["Pacientes"] / total_pac if total_pac else np.nan
-    grouped["PctIntervenciones"] = grouped["ServicioTarifa"].map(
+    grouped["RatioIntervenciones"] = grouped["ServicioTarifa"].map(
         lambda x: map_interv_pct(x, INTERV_PCT_MAP)
     )
-
-    if apply_increment:
-        inc = grouped["Incremento"].fillna(0)
-        inc = inc.apply(lambda v: v / 100 if pd.notna(v) and v > 1 else v)
-        grouped["TarifaPromedio"] = grouped["TarifaPromedio"] * (1 + inc)
+    # Se mantiene por compatibilidad de firma, pero no se aplica incremento adicional.
+    _ = apply_increment
     return grouped
 
 
@@ -250,7 +247,7 @@ def parse_tarifas_procedimientos(
     proc["PctPacientes"] = proc["Pacientes"] / total_pac if total_pac else np.nan
 
     service_totals = proc.groupby("ServicioTarifa")["Pacientes"].sum()
-    proc["PctIntervenciones"] = proc.apply(
+    proc["RatioIntervenciones"] = proc.apply(
         lambda row: map_interv_pct(row["ServicioTarifa"], INTERV_PCT_MAP)
         * (row["Pacientes"] / service_totals.get(row["ServicioTarifa"], np.nan))
         if service_totals.get(row["ServicioTarifa"], 0) > 0
@@ -277,7 +274,7 @@ def parse_tarifas_procedimientos(
     serv["ServicioTarifa"] = serv["ServicioTarifa"].astype(str).str.upper().str.strip()
     total_pac_serv = serv["Pacientes"].sum()
     serv["PctPacientes"] = serv["Pacientes"] / total_pac_serv if total_pac_serv else np.nan
-    serv["PctIntervenciones"] = serv["ServicioTarifa"].map(
+    serv["RatioIntervenciones"] = serv["ServicioTarifa"].map(
         lambda x: map_interv_pct(x, INTERV_PCT_MAP)
     )
     return proc, serv
@@ -285,6 +282,9 @@ def parse_tarifas_procedimientos(
 
 def scenario_id_from_label(label: str) -> int:
     norm = normalize_text(label)
+    nums = re.findall(r"\d+", norm)
+    if nums:
+        return int(nums[0])
     if "incremento" in norm:
         return 3
     if "bogota" in norm:
@@ -400,6 +400,34 @@ def _parse_percent_value(value: object) -> float:
     return float(out)
 
 
+def _parse_ratio_value(value: object) -> float:
+    if pd.isna(value):
+        return np.nan
+    text = str(value).strip()
+    if not text:
+        return np.nan
+    has_percent = "%" in text
+    text = text.replace("%", "").replace(" ", "")
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    try:
+        out = float(text)
+    except Exception:
+        return np.nan
+    if has_percent:
+        return float(out / 100.0)
+    # En ratios de intervenciones, valores como 15 suelen venir como 15% (0.15)
+    # mientras que 0.15 o 1.30 deben respetarse como ratio directo.
+    if out > 2:
+        out = out / 100.0
+    return float(out)
+
+
 def _build_tarifa_scenario_group(
     work: pd.DataFrame,
     servicio_col: str,
@@ -429,7 +457,7 @@ def _build_tarifa_scenario_group(
             local[pacientes_valle_col], errors="coerce"
         )
     if ratio_interv_col:
-        local[ratio_interv_col] = local[ratio_interv_col].map(_parse_percent_value)
+        local[ratio_interv_col] = local[ratio_interv_col].map(_parse_ratio_value)
     if intervenciones_col:
         local[intervenciones_col] = pd.to_numeric(local[intervenciones_col], errors="coerce")
 
@@ -713,16 +741,16 @@ def build_tarifa_table(
         work["interv_pct_map"] = work[servicio_col].map(lambda x: map_interv_pct(x, interv_map))
         service_totals = work.groupby(servicio_col)[pacientes_col].sum().rename("service_total_pac")
         work = work.merge(service_totals, left_on=servicio_col, right_index=True, how="left")
-        work["pct_interv_row"] = work["interv_pct_map"] * (
+        work["ratio_interv_row"] = work["interv_pct_map"] * (
             work[pacientes_col] / work["service_total_pac"]
         )
     elif inter_col:
         total_interv = work[inter_col].sum()
-        work["pct_interv_row"] = (
+        work["ratio_interv_row"] = (
             work[inter_col] / total_interv if total_interv and total_interv > 0 else np.nan
         )
     else:
-        work["pct_interv_row"] = np.nan
+        work["ratio_interv_row"] = np.nan
 
     group_col = procedimiento_col or servicio_col
 
@@ -739,7 +767,7 @@ def build_tarifa_table(
                 {
                     "TarifaPromedio": weighted_tarifa(g),
                     "Pacientes": g[pacientes_col].sum(),
-                    "PctIntervenciones": g["pct_interv_row"].sum(min_count=1),
+                    "RatioIntervenciones": g["ratio_interv_row"].sum(min_count=1),
                 }
             )
         )
@@ -750,11 +778,13 @@ def build_tarifa_table(
     grouped["PctPacientes"] = (
         grouped["Pacientes"] / total_pacientes if total_pacientes and total_pacientes > 0 else np.nan
     )
-    grouped["PctIntervenciones"] = grouped["PctIntervenciones"].fillna(grouped["PctPacientes"])
+    grouped["RatioIntervenciones"] = grouped["RatioIntervenciones"].fillna(
+        grouped["PctPacientes"]
+    )
 
     if posibles_valle is not None and pd.notna(posibles_valle):
         grouped["PacientesValle"] = grouped["PctPacientes"] * posibles_valle
-        grouped["Intervenciones"] = grouped["PacientesValle"] * (1 + grouped["PctIntervenciones"])
+        grouped["Intervenciones"] = grouped["PacientesValle"] * grouped["RatioIntervenciones"]
         grouped["Ventas"] = grouped["Intervenciones"] * grouped["TarifaPromedio"]
     else:
         grouped["PacientesValle"] = np.nan
@@ -766,7 +796,7 @@ def build_tarifa_table(
         "TarifaPromedio": weighted_tarifa(work),
         "Pacientes": grouped["Pacientes"].sum(min_count=1),
         "PctPacientes": grouped["PctPacientes"].sum(min_count=1),
-        "PctIntervenciones": grouped["PctIntervenciones"].sum(min_count=1),
+        "RatioIntervenciones": grouped["RatioIntervenciones"].sum(min_count=1),
         "PacientesValle": grouped["PacientesValle"].sum(min_count=1),
         "Intervenciones": grouped["Intervenciones"].sum(min_count=1),
         "Ventas": grouped["Ventas"].sum(min_count=1),
@@ -856,9 +886,9 @@ EEFF_DERIVED_ACCOUNTS = {
 }
 
 PRICE_SCENARIOS = [
-    "Santander (1)",
-    "Bogotá (2)",
-    "Bogotá + Incremento Cali (3)",
+    "Escenario 1",
+    "Escenario 2",
+    "Escenario 3",
 ]
 
 EEFF_DRIVER_ACCOUNTS = [a for a in EEFF_OUTPUT_ORDER if a not in EEFF_DERIVED_ACCOUNTS]
@@ -1595,9 +1625,9 @@ with tab_eeff:
             explain_box(
                 "Como se calcula",
                 [
-                    "Fuente: proyecciones.xlsx (si está disponible).",
+                    "Fuente: proyecciones.xlsx (si estÃ¡ disponible).",
                     "KPIs principales: ingresos, costos, EBITDA y flujo de caja.",
-                    "Se muestran métricas del año 2030 como referencia.",
+                    "Se muestran mÃ©tricas del aÃ±o 2030 como referencia.",
                 ],
             )
 
@@ -1644,7 +1674,7 @@ with tab_eeff:
                 "Como se calcula",
                 [
                     "Detalle anual de ingresos, costos, EBITDA, flujo de caja y capex.",
-                    "Cifras en COP billones según el archivo de proyecciones.",
+                    "Cifras en COP billones segÃºn el archivo de proyecciones.",
                 ],
             )
             money_cols = [
@@ -1660,22 +1690,21 @@ with tab_eeff:
             )
 
     divider()
-    section_header("Ventas Año 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
+    section_header("Ventas AÃ±o 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
     explain_box(
         "Como se calcula",
         [
-            "Año 1 parte del objetivo de pacientes del Valle.",
-            "Ese total se distribuye por servicio según %Pacientes del escenario de precios.",
+            "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
+            "El mix (%Pacientes) se recalcula desde ese AÃ±o 1 y se proyecta hacia adelante.",
             "Tarifa operativa por servicio: TARIFAS (valor final del escenario).",
             "Intervenciones = RatioIntervenciones x PacientesValle.",
-            "Desde Año 2 en adelante se usa el promedio histórico de crecimiento de ventas.",
+            "Desde AÃ±o 2 en adelante se usa el promedio histÃ³rico de crecimiento de ventas.",
         ],
     )
     if pd.isna(objetivo_valle):
         st.warning("No se pudo calcular el objetivo Valle (posibles atendidos).")
     else:
         scenario = st.session_state.get("precio_scenario", PRICE_SCENARIOS[0])
-        scenario_id = scenario_id_from_label(scenario)
 
         tariffs_serv, _ = selector_escenario_tarifas(
             scenario, tarifas_esc_df
@@ -1702,6 +1731,16 @@ with tab_eeff:
             tariffs["PctPacientes"] = pd.to_numeric(
                 tariffs.get("PctPacientes"), errors="coerce"
             )
+            tariffs["PacientesValle"] = pd.to_numeric(
+                tariffs.get("PacientesValle"), errors="coerce"
+            )
+            tariffs["RatioIntervenciones"] = pd.to_numeric(
+                tariffs.get("RatioIntervenciones"), errors="coerce"
+            )
+            tariffs["IntervencionesRaw"] = pd.to_numeric(
+                tariffs.get("IntervencionesRaw"), errors="coerce"
+            )
+
             if tariffs["PctPacientes"].isna().all():
                 st.warning(
                     "No se pudo calcular el % de pacientes del escenario; se reparte en partes iguales."
@@ -1713,12 +1752,50 @@ with tab_eeff:
                 if total_mix and total_mix > 0:
                     tariffs["PctPacientes"] = tariffs["PctPacientes"] / total_mix
 
-            tariffs["Pacientes_Ano1"] = objetivo_valle * tariffs["PctPacientes"]
-            tariffs["Intervenciones_Ano1"] = tariffs.apply(
-                lambda row: row["Pacientes_Ano1"] * (1 + row["PctIntervenciones"])
-                if pd.notna(row.get("PctIntervenciones"))
-                else row["Pacientes_Ano1"],
-                axis=1,
+            if tariffs["PacientesValle"].notna().any():
+                tariffs["Pacientes_Ano1"] = tariffs["PacientesValle"]
+                missing_pac = tariffs["Pacientes_Ano1"].isna()
+                if missing_pac.any():
+                    tariffs.loc[missing_pac, "Pacientes_Ano1"] = (
+                        objetivo_valle * tariffs.loc[missing_pac, "PctPacientes"]
+                    )
+            else:
+                tariffs["Pacientes_Ano1"] = objetivo_valle * tariffs["PctPacientes"]
+
+            total_year1 = pd.to_numeric(
+                tariffs["Pacientes_Ano1"], errors="coerce"
+            ).sum(min_count=1)
+            if pd.notna(total_year1) and total_year1 > 0:
+                tariffs["PctPacientes"] = (
+                    pd.to_numeric(tariffs["Pacientes_Ano1"], errors="coerce")
+                    / float(total_year1)
+                )
+
+            ratio_fallback = np.divide(
+                tariffs["IntervencionesRaw"].to_numpy(dtype=float),
+                pd.to_numeric(
+                    tariffs["Pacientes_Ano1"], errors="coerce"
+                ).to_numpy(dtype=float),
+                out=np.full(len(tariffs), np.nan, dtype=float),
+                where=(
+                    pd.to_numeric(
+                        tariffs["Pacientes_Ano1"], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    > 0
+                ),
+            )
+            missing_ratio = tariffs["RatioIntervenciones"].isna()
+            if missing_ratio.any():
+                tariffs.loc[missing_ratio, "RatioIntervenciones"] = ratio_fallback[
+                    missing_ratio
+                ]
+            if tariffs["RatioIntervenciones"].isna().any():
+                st.warning(
+                    "Hay servicios sin RatioIntervenciones; las intervenciones y ventas de esos servicios quedan en NA."
+                )
+
+            tariffs["Intervenciones_Ano1"] = (
+                tariffs["Pacientes_Ano1"] * tariffs["RatioIntervenciones"]
             )
             tariffs["Ventas_Ano1"] = tariffs["Intervenciones_Ano1"] * tariffs["TarifaPromedio"]
 
@@ -1728,21 +1805,10 @@ with tab_eeff:
                 "PctPacientes",
                 "Pacientes_Ano1",
                 "TarifaPromedio",
-                "PctIntervenciones",
+                "RatioIntervenciones",
+                "Intervenciones_Ano1",
                 "Ventas_Ano1",
             ]
-            if scenario_id == 3:
-                show_cols = [
-                    "ServicioTarifa",
-                    "OrigenServicio",
-                    "PctPacientes",
-                    "Pacientes_Ano1",
-                    "TarifaPromedio",
-                    "INCREMENTO CALI",
-                    "TARIFAS CON INCREMENTO",
-                    "PctIntervenciones",
-                    "Ventas_Ano1",
-                ]
             show_df = tariffs[show_cols].rename(columns={"ServicioTarifa": "Servicio"})
 
             total_row = {
@@ -1751,7 +1817,8 @@ with tab_eeff:
                 "PctPacientes": show_df["PctPacientes"].sum(min_count=1),
                 "Pacientes_Ano1": show_df["Pacientes_Ano1"].sum(min_count=1),
                 "TarifaPromedio": np.nan,
-                "PctIntervenciones": np.nan,
+                "RatioIntervenciones": np.nan,
+                "Intervenciones_Ano1": show_df["Intervenciones_Ano1"].sum(min_count=1),
                 "Ventas_Ano1": show_df["Ventas_Ano1"].sum(min_count=1),
             }
             show_df = pd.concat([show_df, pd.DataFrame([total_row])], ignore_index=True)
@@ -1761,29 +1828,28 @@ with tab_eeff:
                     "PctPacientes": lambda v: "" if pd.isna(v) else f"{v:.1%}",
                     "Pacientes_Ano1": "{:,.1f}",
                     "TarifaPromedio": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                    "INCREMENTO CALI": lambda v: "" if pd.isna(v) else f"{v:.2%}",
-                    "TARIFAS CON INCREMENTO": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                    "PctIntervenciones": lambda v: "" if pd.isna(v) else f"{v:.1%}",
+                    "RatioIntervenciones": lambda v: "" if pd.isna(v) else f"{v:.2f}x",
+                    "Intervenciones_Ano1": "{:,.1f}",
                     "Ventas_Ano1": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                 }
             )
             st.dataframe(styled, width='stretch')
 
             divider()
-            section_header("Proyección anual por servicio", "Mix del escenario activo desde Año 2")
+            section_header("ProyecciÃ³n anual por servicio", "Mix del escenario activo desde AÃ±o 2")
             explain_box(
                 "Como se calcula",
                 [
-                    "Año 1 usa el objetivo de pacientes del Valle distribuido por mix de servicios.",
-                    "Desde Año 2 se mantiene el mix (%Pacientes) del escenario activo.",
-                    "Crecimiento anual fijo igual al promedio histórico de ventas.",
+                    "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
+                    "Desde AÃ±o 2 se mantiene el mix (%Pacientes) del escenario activo.",
+                    "Crecimiento anual fijo igual al promedio histÃ³rico de ventas.",
                 ],
             )
             total_year1 = show_df.loc[show_df["Servicio"] != "TOTAL", "Pacientes_Ano1"].sum()
 
             c_obj1, c_obj2 = st.columns(2)
             c_obj1.metric("Objetivo Valle (pacientes)", f"{objetivo_valle:,.0f}")
-            c_obj2.metric("Pacientes Año 1 proyectados", f"{total_year1:,.0f}")
+            c_obj2.metric("Pacientes AÃ±o 1 proyectados", f"{total_year1:,.0f}")
 
             growth_default = growth_avg
             if pd.isna(growth_default):
@@ -1792,8 +1858,8 @@ with tab_eeff:
             growth_rate = float(growth_default)
             st.caption(f"Tasa predeterminada aplicada: {growth_default:.2%}.")
             st.caption(
-                f"Crecimiento histórico calculado: {growth_default:.2%}. "
-                "Esta misma tasa se usa para proyectar desde Año 2."
+                f"Crecimiento histÃ³rico calculado: {growth_default:.2%}. "
+                "Esta misma tasa se usa para proyectar desde AÃ±o 2."
             )
 
             proj_years = list(range(2026, 2031))
@@ -1804,7 +1870,7 @@ with tab_eeff:
                 else:
                     total_year = total_year1 * (1 + growth_rate) ** (year - 2026)
                     patients_by_service = total_year * tariffs["PctPacientes"]
-                interventions = patients_by_service * (1 + tariffs["PctIntervenciones"].fillna(0))
+                interventions = patients_by_service * tariffs["RatioIntervenciones"]
                 sales = interventions * tariffs["TarifaPromedio"]
                 for idx, svc in enumerate(tariffs["ServicioTarifa"]):
                     service_rows.append(
@@ -1871,7 +1937,7 @@ with tab_eeff:
                     "Como se calcula",
                     [
                         "Proxy construido con ventas por tarifas + ratios Santander.",
-                        "Se estima EBITDA y margen a partir de proporciones históricas.",
+                        "Se estima EBITDA y margen a partir de proporciones histÃ³ricas.",
                     ],
                 )
                 revenue_by_year = proj_totals.set_index("Ano")["Ventas"].sort_index()
@@ -1906,7 +1972,7 @@ with tab_eeff:
             explain_box(
                 "Como se calcula",
                 [
-                    "Base Bogotá: promedio monetario 2024-2025 desde BOGOTA_DESGLOSE.",
+                    "Base BogotÃ¡: promedio monetario 2024-2025 desde BOGOTA_DESGLOSE.",
                     "Ajuste Cali: factor editable por cuenta aplicado sobre montos base.",
                     "Con el EEFF base Cali se obtienen proporciones y se aplican a ingresos proyectados.",
                     "Las filas de utilidades/totales siempre se recalculan por formula contable.",
@@ -2052,7 +2118,7 @@ with tab_eeff:
                     }
                 )
 
-                section_header("Base Bogotá -> Base Cali (monto)")
+                section_header("Base BogotÃ¡ -> Base Cali (monto)")
                 st.dataframe(
                     base_table.style.format(
                         {
@@ -2082,7 +2148,7 @@ with tab_eeff:
                 else:
                     st.caption(
                         "Proyeccion EEFF: primero se ajusta monto base por factor Cali, luego se "
-                        "calculan proporciones y finalmente se aplican a ingresos proyectados por año."
+                        "calculan proporciones y finalmente se aplican a ingresos proyectados por aÃ±o."
                     )
                     year_col_proj = pick_year_col(proj_totals)
                     if year_col_proj is None:
@@ -2578,7 +2644,8 @@ with tab_tar:
         "Como se calcula",
         [
             "Se usa la hoja Tarifas_Escenarios.",
-            "TarifaPromedio se calcula desde TARIFAS CON INCREMENTO en los 3 escenarios.",
+            "TarifaPromedio se toma directamente desde TARIFAS (sin incremento adicional).",
+            "Intervenciones = RatioIntervenciones x PacientesValle.",
             "En escenario 1 se completan servicios faltantes desde escenario 2 y se reescalan ponderaciones.",
         ],
     )
@@ -2588,7 +2655,6 @@ with tab_tar:
         st.caption(f"Detalle: {tarifas_esc_source}")
     else:
         scenario = st.session_state.get("precio_scenario", PRICE_SCENARIOS[0])
-        scenario_id = scenario_id_from_label(scenario)
         st.caption(f"Escenario activo: {scenario}")
 
         scenario_df, _ = selector_escenario_tarifas(scenario, tarifas_esc_df)
@@ -2600,28 +2666,14 @@ with tab_tar:
                 "ServicioTarifa",
                 "OrigenServicio",
                 "TarifaBase",
-                "TARIFAS CON INCREMENTO",
                 "TarifaPromedio",
                 "Pacientes",
+                "PacientesValle",
                 "PctPacientes",
-                "PctIntervenciones",
+                "RatioIntervenciones",
+                "IntervencionesRaw",
             ]
-            rename_map = {
-                "ServicioTarifa": "Servicio",
-                "TarifaBase": "Tarifas",
-            }
-            if scenario_id == 3:
-                show_cols = [
-                    "ServicioTarifa",
-                    "OrigenServicio",
-                    "TarifaBase",
-                    "INCREMENTO CALI",
-                    "TARIFAS CON INCREMENTO",
-                    "TarifaPromedio",
-                    "Pacientes",
-                    "PctPacientes",
-                    "PctIntervenciones",
-                ]
+            rename_map = {"ServicioTarifa": "Servicio", "TarifaBase": "Tarifas"}
             view = scenario_df[show_cols].rename(columns=rename_map)
 
             total_row = {
@@ -2630,11 +2682,11 @@ with tab_tar:
                 "Tarifas": np.nan,
                 "TarifaPromedio": np.nan,
                 "Pacientes": pd.to_numeric(view.get("Pacientes"), errors="coerce").sum(min_count=1),
+                "PacientesValle": pd.to_numeric(view.get("PacientesValle"), errors="coerce").sum(min_count=1),
                 "PctPacientes": pd.to_numeric(view.get("PctPacientes"), errors="coerce").sum(min_count=1),
-                "PctIntervenciones": pd.to_numeric(view.get("PctIntervenciones"), errors="coerce").sum(min_count=1),
+                "RatioIntervenciones": np.nan,
+                "IntervencionesRaw": pd.to_numeric(view.get("IntervencionesRaw"), errors="coerce").sum(min_count=1),
             }
-            total_row["INCREMENTO CALI"] = pd.to_numeric(view.get("INCREMENTO CALI"), errors="coerce").mean()
-            total_row["TARIFAS CON INCREMENTO"] = np.nan
             view = pd.concat([view, pd.DataFrame([total_row])], ignore_index=True)
 
             st.dataframe(
@@ -2642,11 +2694,11 @@ with tab_tar:
                     {
                         "Tarifas": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                         "TarifaPromedio": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                        "INCREMENTO CALI": lambda v: "" if pd.isna(v) else f"{v:.2%}",
-                        "TARIFAS CON INCREMENTO": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                         "Pacientes": "{:,.0f}",
+                        "PacientesValle": "{:,.0f}",
                         "PctPacientes": fmt_percent,
-                        "PctIntervenciones": fmt_percent,
+                        "RatioIntervenciones": lambda v: "" if pd.isna(v) else f"{v:.2f}x",
+                        "IntervencionesRaw": "{:,.0f}",
                     }
                 ),
                 width='stretch',
@@ -2716,7 +2768,7 @@ with tab_sant:
     )
     ingresos_view = pd.DataFrame(
         {"Ingresos": ingresos_series, "YoY": yoy}
-    ).reset_index().rename(columns={"Year": "Año"})
+    ).reset_index().rename(columns={"Year": "AÃ±o"})
     st.dataframe(
         ingresos_view.style.format({"Ingresos": fmt_currency, "YoY": fmt_percent}),
         width='stretch',
@@ -2727,8 +2779,8 @@ with tab_sant:
     explain_box(
         "Como se calcula",
         [
-            "Cada cuenta dividida por ingresos del año.",
-            "Se calcula promedio histórico como referencia.",
+            "Cada cuenta dividida por ingresos del aÃ±o.",
+            "Se calcula promedio histÃ³rico como referencia.",
         ],
     )
     ratio_df = annual_pivot.div(ingresos_series, axis=1).replace([np.inf, -np.inf], np.nan)
@@ -2896,8 +2948,8 @@ with tab_share:
     explain_box(
         "Como se calcula",
         [
-            "Tabla IPS x Año con participación %.",
-            "Incluye fila TOTAL para validar ~100% por año.",
+            "Tabla IPS x AÃ±o con participaciÃ³n %.",
+            "Incluye fila TOTAL para validar ~100% por aÃ±o.",
         ],
     )
     total_row = {"IPS": "TOTAL"}
@@ -2908,6 +2960,7 @@ with tab_share:
         share_df.style.format({year: "{:.2%}" for year in proj_years_share}),
         width='stretch',
     )
+
 
 
 
