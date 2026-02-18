@@ -406,7 +406,6 @@ def _parse_ratio_value(value: object) -> float:
     text = str(value).strip()
     if not text:
         return np.nan
-    has_percent = "%" in text
     text = text.replace("%", "").replace(" ", "")
     if "," in text and "." in text:
         if text.rfind(",") > text.rfind("."):
@@ -419,12 +418,7 @@ def _parse_ratio_value(value: object) -> float:
         out = float(text)
     except Exception:
         return np.nan
-    if has_percent:
-        return float(out / 100.0)
-    # En ratios de intervenciones, valores como 15 suelen venir como 15% (0.15)
-    # mientras que 0.15 o 1.30 deben respetarse como ratio directo.
-    if out > 2:
-        out = out / 100.0
+    # RATIO INTERVENCIONES se toma tal cual viene en la hoja.
     return float(out)
 
 
