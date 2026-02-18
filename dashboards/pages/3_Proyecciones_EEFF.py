@@ -1666,7 +1666,8 @@ with tab_eeff:
         [
             "Año 1 parte del objetivo de pacientes del Valle.",
             "Ese total se distribuye por servicio según %Pacientes del escenario de precios.",
-            "Se aplican tarifas operativas desde TARIFAS CON INCREMENTO y % intervenciones.",
+            "Tarifa operativa por servicio: TARIFAS (valor final del escenario).",
+            "Intervenciones = RatioIntervenciones x PacientesValle.",
             "Desde Año 2 en adelante se usa el promedio histórico de crecimiento de ventas.",
         ],
     )
