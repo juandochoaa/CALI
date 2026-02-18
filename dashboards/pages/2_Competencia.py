@@ -240,12 +240,6 @@ if capacidad_df.empty:
     if not alt_capacidad_df.empty:
         capacidad_df, capacidad_source = alt_capacidad_df, alt_capacidad_source
 tarifas_comp_df, tarifas_comp_source = load_cifras_eps("TarifasCompetencia")
-tarifas_esc_df, tarifas_esc_source = load_cifras_eps("Tarifas_Escenarios")
-if tarifas_esc_df.empty:
-    alt_tarifas_esc_df, alt_tarifas_esc_source = load_cifras_eps("Tarifas Escenarios")
-    if not alt_tarifas_esc_df.empty:
-        tarifas_esc_df, tarifas_esc_source = alt_tarifas_esc_df, alt_tarifas_esc_source
-
 if ips_df.empty:
     st.warning("No se encontro el archivo de estados financieros IPS o no se pudo leer.")
     st.caption(f"Detalle: {ips_source}")
@@ -1368,97 +1362,39 @@ with tab_tarifas:
             "No se usa para calculos del modelo.",
         ],
     )
-    section_header("Tarifas Bogota + Incremento Cali", "Fuente: Tarifas_Escenarios")
+    section_header("Incremento Cali por servicio (referencia)", "Fuente: referencia definida por negocio")
     explain_box(
         "Como se calcula",
         [
-            "Tabla resumida con columnas clave de escenarios.",
+            "Tabla fija de incrementos por servicio.",
             "No se usa para calculos del modelo.",
         ],
     )
-    if tarifas_esc_df.empty:
-        st.warning("No se pudo leer la hoja Tarifas_Escenarios.")
-        st.caption(f"Detalle: {tarifas_esc_source}")
-    else:
-        cols = [str(c) for c in tarifas_esc_df.columns]
-        col_escenario = (
-            find_col(cols, ["escenario"])
-            or find_col(cols, ["scenario"])
-            or find_col(cols, ["tipo"])
-        )
-        col_tarifa_prom = (
-            find_col(cols, ["tarifas", "promedio"])
-            or find_col(cols, ["tarifa", "promedio"])
-        )
-        col_inc_cali = find_col(cols, ["incremento", "cali"])
-        col_tarifa_inc = (
-            find_col(cols, ["tarifas", "con", "incremento"])
-            or find_col(cols, ["tarifa", "con", "incremento"])
-        )
-        missing = [
-            name
-            for name, col in [
-                ("TARIFAS PROMEDIO", col_tarifa_prom),
-                ("INCREMENTO CALI", col_inc_cali),
-                ("TARIFAS CON INCREMENTO", col_tarifa_inc),
-            ]
-            if col is None
-        ]
-        if missing:
-            st.warning("No se encontraron todas las columnas esperadas en Tarifas_Escenarios.")
-            st.caption(f"Faltantes: {', '.join(missing)}")
-            st.caption(f"Columnas disponibles: {cols}")
-        else:
-            esc_view = tarifas_esc_df.copy()
-            if col_escenario:
-                esc_norm = esc_view[col_escenario].astype(str).map(normalize_text)
-                mask_esc_3 = esc_norm.str.contains(r"\b3\b", regex=True) | (
-                    esc_norm.str.contains("incremento", na=False)
-                    & esc_norm.str.contains("cali", na=False)
-                )
-                esc_view = esc_view[mask_esc_3]
-            else:
-                inc_series = pd.to_numeric(esc_view[col_inc_cali], errors="coerce")
-                tarifa_inc_series = pd.to_numeric(esc_view[col_tarifa_inc], errors="coerce")
-                esc_view = esc_view[inc_series.notna() | tarifa_inc_series.notna()]
-
-            if esc_view.empty:
-                st.warning("No se encontraron filas del escenario 3 en Tarifas_Escenarios.")
-                st.caption("Revisa columna de escenario o datos de incremento.")
-            else:
-                small = esc_view[[col_tarifa_prom, col_inc_cali, col_tarifa_inc]].copy()
-                small = small.rename(
-                    columns={
-                        col_tarifa_prom: "TARIFAS PROMEDIO",
-                        col_inc_cali: "INCREMENTO CALI",
-                        col_tarifa_inc: "TARIFAS CON INCREMENTO",
-                    }
-                )
-                small["TARIFAS PROMEDIO"] = pd.to_numeric(
-                    small["TARIFAS PROMEDIO"], errors="coerce"
-                )
-                small["INCREMENTO CALI"] = pd.to_numeric(
-                    small["INCREMENTO CALI"], errors="coerce"
-                )
-                small["TARIFAS CON INCREMENTO"] = pd.to_numeric(
-                    small["TARIFAS CON INCREMENTO"], errors="coerce"
-                )
-                st.dataframe(
-                    small.style.format(
-                        {
-                            "TARIFAS PROMEDIO": lambda v: "" if pd.isna(v) else fmt_currency(float(v)),
-                            "INCREMENTO CALI": lambda v: (
-                                ""
-                                if pd.isna(v)
-                                else f"{(v / 100 if v > 1 else v):.2%}"
-                            ),
-                            "TARIFAS CON INCREMENTO": lambda v: (
-                                "" if pd.isna(v) else fmt_currency(float(v))
-                            ),
-                        }
-                    ),
-                    width='stretch',
-                )
+    incremento_ref_df = pd.DataFrame(
+        [
+            ("MDNI", 0.70),
+            ("CONSULTIA", 0.15),
+            ("REPRO", 0.15),
+            ("HEMO", 0.08),
+            ("ELECTRO", 0.08),
+            ("CIRUGIA", 0.08),
+            ("TERAPIAS", 0.50),
+            ("VASCULAR PERIF", 2.12),
+            ("BANCO DE SANGRE", 2.00),
+            ("LABORATORIO", 2.00),
+            ("ENDOVASCULAR", 0.08),
+            ("ESTANCIA", -0.30),
+            ("NEURO", 0.08),
+            ("RADIOLOGIA", 2.12),
+        ],
+        columns=["Servicio", "Incremento Cali"],
+    )
+    st.dataframe(
+        incremento_ref_df.style.format(
+            {"Incremento Cali": lambda v: "" if pd.isna(v) else f"{v:.0%}"}
+        ),
+        width='stretch',
+    )
 
     divider()
     if tarifas_comp_df.empty:
