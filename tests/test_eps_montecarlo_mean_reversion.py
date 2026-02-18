@@ -57,6 +57,7 @@ def _build_minimal_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, p
     add_row("Costosdetransporte", transporte)
     add_row("Impuestoycontribuciones", impuestos)
     add_row("Otrosgastos", otros)
+    add_row("Comercialesyotrascuentasapagar", [12000.0] * len(years))
     eps_eeff_df = pd.DataFrame(cuentas)
 
     return upc_df, eps_eeff_df, eps_edad_df, eps_anos_df
@@ -78,6 +79,7 @@ def test_mean_reversion_params_and_removed_cashdays_zero() -> None:
     assert "P_avg_CashDays_lt_0" not in results_df.columns
     assert "P_avg_CashDays_lt_0" not in PROBABILITY_COLUMNS
     assert "P_avg_CashDays_lt_15" in results_df.columns
+    assert "P_avg_PayDays_out_20_70" in results_df.columns
 
     params_df = diagnostics["mean_reversion_params"]
     assert not params_df.empty
@@ -99,3 +101,4 @@ def test_mean_reversion_params_and_removed_cashdays_zero() -> None:
     assert abs(m1_lr - target_lr) < abs(m0_lr - target_lr) + 1e-12
 
     assert np.isfinite(results_df["P_avg_CM_ratio_lt_1"]).all()
+    assert np.isfinite(results_df["P_avg_PayDays_out_20_70"]).all()

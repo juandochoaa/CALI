@@ -30,6 +30,7 @@ from src.models.eps_montecarlo import (
     PROBABILITY_COLUMNS,
     build_eps_historical_compliance,
     build_composite_ranking,
+    compute_cxp_revenue_score,
     build_income_statement_view,
     compute_market_share_valle,
     compute_reclamos_score,
@@ -114,7 +115,7 @@ def render_score_methodology() -> None:
         st.markdown(f"<div style='height:{px}px'></div>", unsafe_allow_html=True)
 
     section_header("Metodologia del Score EPS", "Modelo unificado con riesgo, mercado y reclamos")
-    st.markdown("**1) Riesgo Monte Carlo (60%)**")
+    st.markdown("**1) Riesgo Monte Carlo (50%)**")
     st.latex(
         r"P_{avg,m}=\frac{1}{N_{sim}}\sum_{s=1}^{N_{sim}}\left(\frac{1}{T}\sum_{t=1}^{T}\mathbf{1}[incumple_{m,s,t}]\right)"
     )
@@ -136,9 +137,17 @@ def render_score_methodology() -> None:
     st.latex(r"Score_{Reclamos}=Percentil_{inv}(Tasa_{10k,EPS})")
 
     divider()
+    st.markdown("**4) CxP comerciales / Ingresos (10%)**")
+    st.latex(
+        r"CxP\_over\_REV_{EPS}=\frac{CuentasPorPagarComerciales_{EPS}}{IngresosTotales_{EPS}}"
+    )
+    formula_gap(20)
+    st.latex(r"Score_{CxP/REV}=Percentil_{inv}(CxP\_over\_REV_{EPS})")
+
+    divider()
     st.markdown("**Score final ponderado**")
     st.latex(
-        r"Score_{Final}=0.60\cdot Score_{Riesgo}+0.20\cdot Score_{Mercado}+0.20\cdot Score_{Reclamos}"
+        r"Score_{Final}=0.50\cdot Score_{Riesgo}+0.20\cdot Score_{Mercado}+0.20\cdot Score_{Reclamos}+0.10\cdot Score_{CxP/REV}"
     )
 
     formulas_df = pd.DataFrame(
@@ -148,7 +157,9 @@ def render_score_methodology() -> None:
             {"Variable": "Score_Mercado", "Definicion": "Percentil directo de participacion de afiliados en Valle."},
             {"Variable": "Tasa_Reclamos_10k", "Definicion": "Tasa de reclamos por cada 10.000 afiliados (hoja RECLAMOS)."},
             {"Variable": "Score_Reclamos", "Definicion": "Percentil invertido de la tasa de reclamos (menor tasa = mejor)."},
-            {"Variable": "Score_Final", "Definicion": "Combinacion ponderada 60/20/20 de riesgo, mercado y reclamos."},
+            {"Variable": "CxP_over_REV", "Definicion": "Cuentas por pagar comerciales sobre ingresos totales (menor = mejor)."},
+            {"Variable": "Score_CxP_REV", "Definicion": "Percentil invertido de CxP_over_REV."},
+            {"Variable": "Score_Final", "Definicion": "Combinacion ponderada 50/20/20/10 de riesgo, mercado, reclamos y CxP/REV."},
         ]
     )
     st.dataframe(formulas_df, width="stretch", hide_index=True)
@@ -211,6 +222,10 @@ def render_score_methodology() -> None:
 
     st.markdown("**4) Ratios de cumplimiento evaluados cada ano**")
     st.latex(r"CashDays_{s,t}=365\cdot\frac{Cash_{s,t}}{OPEX\_cash_{s,t}}")
+    st.latex(r"CxP\_ratio_{s,t}\sim \mathrm{clip}\left(\mathcal{N}\left(\mu_{CxP/REV},\sigma_{CxP/REV}\right),0,3\right)")
+    st.latex(r"CxP_{s,t}=Ingresos_{s,t}\cdot CxP\_ratio_{s,t}")
+    st.latex(r"PayDays_{s,t}=365\cdot\frac{CxP_{s,t}}{OPEX\_cash_{s,t}}")
+    st.latex(r"incumple_{PayDays,s,t}=\mathbf{1}\left[PayDays_{s,t}<20\ \vee\ PayDays_{s,t}>70\right]")
     st.latex(r"CM\_ratio_{s,t}=\frac{Equity_{s,t}}{CapMinReq_e}")
     st.latex(r"PA\_ratio_{s,t}=\frac{Equity_{s,t}}{0.08\cdot Ingresos_{s,t}\cdot LR_{s,t}}")
     st.latex(r"RI\_ratio_{s,t}=\frac{Cash_{s,t}+Inversiones_{s,t}}{Reservas_{s,t}}")
@@ -466,6 +481,7 @@ def run_clientes_pipeline(
     pd.DataFrame,
     pd.DataFrame,
     pd.DataFrame,
+    pd.DataFrame,
     Dict[str, Dict[str, float]],
 ]:
     scenarios = {
@@ -507,18 +523,25 @@ def run_clientes_pipeline(
         reclamos_df=reclamos_df,
         eps_obj=EPS_OBJ_DEFAULT,
     )
+    cxp_scored_df = compute_cxp_revenue_score(
+        eps_eeff_df=eps_eeff_df,
+        eps_obj=EPS_OBJ_DEFAULT,
+    )
     results_ranked, ranking_escenario, ranking_global = build_composite_ranking(
         scored_df=results_scored,
         market_share_df=market_share_df,
         reclamos_score_df=reclamos_scored_df,
-        risk_weight=0.6,
+        cxp_score_df=cxp_scored_df,
+        risk_weight=0.5,
         market_weight=0.2,
         complaints_weight=0.2,
+        cxp_rev_weight=0.1,
     )
     return (
         diagnostics,
         market_share_df,
         reclamos_scored_df,
+        cxp_scored_df,
         results_ranked,
         ranking_escenario,
         ranking_global,
@@ -576,7 +599,9 @@ with st.sidebar:
         stress_mix_lr_shift = float(st.number_input("STRESS_MIX LR shift", value=0.05, step=0.01, format="%.2f"))
         stress_mix_g_shift = float(st.number_input("STRESS_MIX g shift", value=-0.03, step=0.01, format="%.2f"))
 
-    st.caption("Score final: 60% riesgo Monte Carlo + 20% mercado Valle + 20% reclamos.")
+    st.caption(
+        "Score final: 50% riesgo Monte Carlo + 20% mercado Valle + 20% reclamos + 10% CxP/Ingresos."
+    )
 
 render_score_methodology()
 
@@ -588,6 +613,7 @@ explain_box(
         "Las probabilidades se calculan con Monte Carlo en enfoque PROMEDIO.",
         "El % de mercado se calcula sobre todo Valle del Cauca (denominador total Valle).",
         "La tasa de reclamos por 10.000 afiliados se transforma a score por percentiles invertidos.",
+        "CxP/Ingresos se calcula con cuentas por pagar comerciales sobre ingresos totales (menor = mejor).",
     ],
 )
 
@@ -628,6 +654,7 @@ with st.spinner("Ejecutando simulacion Monte Carlo..."):
         diagnostics,
         market_share_df,
         reclamos_scored_df,
+        cxp_scored_df,
         results_ranked,
         ranking_escenario,
         ranking_global,
@@ -658,17 +685,21 @@ ranking_global_exec["Imputada"] = ranking_global_exec["prob_imputada"].map({True
 ranking_global_exec["Imputada_Reclamos"] = ranking_global_exec["reclamos_imputado"].map(
     {True: "Si", False: "No"}
 )
+ranking_global_exec["Imputada_CxP"] = ranking_global_exec["cxp_rev_imputado"].map(
+    {True: "Si", False: "No"}
+)
 
 tab_analisis, tab_datos, tab_eps = st.tabs(["Analisis", "Datos", "Analisis EPS"])
 
 with tab_analisis:
-    section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle + reclamos")
+    section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle + reclamos + CxP/Ingresos")
     scen_choice = st.selectbox("Escenario", list(scenarios.keys()), index=0)
 
     ranking_exec = ranking_escenario[ranking_escenario["Escenario"] == scen_choice].copy()
     ranking_exec["Riesgo"] = ranking_exec["Score_Final"].map(risk_bucket)
     ranking_exec["Imputada"] = ranking_exec["prob_imputada"].map({True: "Si", False: "No"})
     ranking_exec["Imputada_Reclamos"] = ranking_exec["reclamos_imputado"].map({True: "Si", False: "No"})
+    ranking_exec["Imputada_CxP"] = ranking_exec["cxp_rev_imputado"].map({True: "Si", False: "No"})
 
     top_eps = ranking_exec.sort_values("Ranking_Escenario_Final").head(1)
     top_name = top_eps["EPS"].iloc[0] if not top_eps.empty else "NA"
@@ -709,10 +740,13 @@ with tab_analisis:
                     "Score_Riesgo",
                     "Score_Mercado",
                     "Score_Reclamos",
+                    "Score_CxP_REV",
                     "Tasa_Reclamos_10k",
+                    "CxP_over_REV",
                     "MarketShare_Valle",
                     "Imputada",
                     "Imputada_Reclamos",
+                    "Imputada_CxP",
                 ]
             ].style.format(
                 {
@@ -720,7 +754,9 @@ with tab_analisis:
                     "Score_Riesgo": "{:.1f}",
                     "Score_Mercado": "{:.1f}",
                     "Score_Reclamos": "{:.1f}",
+                    "Score_CxP_REV": "{:.1f}",
                     "Tasa_Reclamos_10k": "{:.2f}",
+                    "CxP_over_REV": "{:.2%}",
                     "MarketShare_Valle": "{:.2%}",
                 }
             ),
@@ -740,17 +776,22 @@ with tab_analisis:
                     "Score_Final",
                     "Score_Riesgo",
                     "Score_Reclamos",
+                    "Score_CxP_REV",
                     "Tasa_Reclamos_10k",
+                    "CxP_over_REV",
                     "MarketShare_Valle",
                     "Imputada",
                     "Imputada_Reclamos",
+                    "Imputada_CxP",
                 ]
             ].style.format(
                 {
                     "Score_Final": "{:.1f}",
                     "Score_Riesgo": "{:.1f}",
                     "Score_Reclamos": "{:.1f}",
+                    "Score_CxP_REV": "{:.1f}",
                     "Tasa_Reclamos_10k": "{:.2f}",
+                    "CxP_over_REV": "{:.2%}",
                     "MarketShare_Valle": "{:.2%}",
                 }
             ),
@@ -759,7 +800,10 @@ with tab_analisis:
         )
 
     divider()
-    section_header("Ranking por escenario", "Score final = 60% riesgo + 20% mercado + 20% reclamos")
+    section_header(
+        "Ranking por escenario",
+        "Score final = 50% riesgo + 20% mercado + 20% reclamos + 10% CxP/Ingresos",
+    )
     st.dataframe(
         ranking_exec[
             [
@@ -771,10 +815,13 @@ with tab_analisis:
                 "Score_Riesgo",
                 "Score_Mercado",
                 "Score_Reclamos",
+                "Score_CxP_REV",
                 "Tasa_Reclamos_10k",
+                "CxP_over_REV",
                 "MarketShare_Valle",
                 "Imputada",
                 "Imputada_Reclamos",
+                "Imputada_CxP",
             ]
         ].style.format(
             {
@@ -782,7 +829,9 @@ with tab_analisis:
                 "Score_Riesgo": "{:.1f}",
                 "Score_Mercado": "{:.1f}",
                 "Score_Reclamos": "{:.1f}",
+                "Score_CxP_REV": "{:.1f}",
                 "Tasa_Reclamos_10k": "{:.2f}",
+                "CxP_over_REV": "{:.2%}",
                 "MarketShare_Valle": "{:.2%}",
             }
         ),
@@ -822,11 +871,14 @@ with tab_analisis:
                 "Score_Riesgo",
                 "Score_Mercado",
                 "Score_Reclamos",
+                "Score_CxP_REV",
                 "Tasa_Reclamos_10k",
+                "CxP_over_REV",
                 "MarketShare_Valle",
                 "Afiliados_Valle",
                 "Imputada",
                 "Imputada_Reclamos",
+                "Imputada_CxP",
             ]
         ].style.format(
             {
@@ -834,7 +886,9 @@ with tab_analisis:
                 "Score_Riesgo": "{:.1f}",
                 "Score_Mercado": "{:.1f}",
                 "Score_Reclamos": "{:.1f}",
+                "Score_CxP_REV": "{:.1f}",
                 "Tasa_Reclamos_10k": "{:.2f}",
+                "CxP_over_REV": "{:.2%}",
                 "MarketShare_Valle": "{:.2%}",
                 "Afiliados_Valle": "{:,.0f}",
             }
@@ -852,6 +906,7 @@ with tab_analisis:
                 "Se imputan probabilidades faltantes por promedio del escenario.",
                 "prob_imputada identifica EPS con faltantes historicos en EEFF.",
                 "Score_Reclamos se obtiene por percentil invertido de Tasa_Reclamos_10k.",
+                "Score_CxP_REV se obtiene por percentil invertido de CxP_over_REV.",
             ],
         )
         prob_cols = (
@@ -860,8 +915,12 @@ with tab_analisis:
             + [
                 "Tasa_Reclamos_10k",
                 "Score_Reclamos",
+                "CxP_over_REV",
+                "Score_CxP_REV",
                 "reclamos_imputado",
                 "motivo_imputacion_reclamos",
+                "cxp_rev_imputado",
+                "motivo_imputacion_cxp_rev",
                 "prob_imputada",
                 "motivo_imputacion",
             ]
@@ -872,7 +931,12 @@ with tab_analisis:
         st.dataframe(
             prob_view.style.format(
                 {col: "{:.2%}" for col in PROBABILITY_COLUMNS}
-                | {"Score_Reclamos": "{:.1f}", "Tasa_Reclamos_10k": "{:.2f}"}
+                | {
+                    "Score_Reclamos": "{:.1f}",
+                    "Tasa_Reclamos_10k": "{:.2f}",
+                    "CxP_over_REV": "{:.2%}",
+                    "Score_CxP_REV": "{:.1f}",
+                }
             ),
             width="stretch",
             hide_index=True,
@@ -905,6 +969,21 @@ with tab_datos:
                 "Tasa_Reclamos_10k": "{:.2f}",
                 "Reclamos": "{:,.0f}",
                 "Score_Reclamos": "{:.1f}",
+            }
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    divider()
+    section_header("CxP comerciales sobre ingresos", "Factor adicional de score (menor = mejor)")
+    st.dataframe(
+        cxp_scored_df.sort_values("CxP_over_REV", ascending=True).style.format(
+            {
+                "CxP_Comercial": "{:,.0f}",
+                "Ingresos": "{:,.0f}",
+                "CxP_over_REV": "{:.2%}",
+                "Score_CxP_REV": "{:.1f}",
             }
         ),
         width="stretch",
@@ -964,6 +1043,8 @@ with tab_eps:
     share_valle = float(eps_global["MarketShare_Valle"].iloc[0]) if not eps_global.empty else np.nan
     score_reclamos_global = float(eps_global["Score_Reclamos"].iloc[0]) if not eps_global.empty else np.nan
     tasa_reclamos_global = float(eps_global["Tasa_Reclamos_10k"].iloc[0]) if not eps_global.empty else np.nan
+    score_cxp_global = float(eps_global["Score_CxP_REV"].iloc[0]) if not eps_global.empty else np.nan
+    cxp_over_rev_global = float(eps_global["CxP_over_REV"].iloc[0]) if not eps_global.empty else np.nan
     resumen_eps = pd.DataFrame(
         [
             {"Indicador": "Ranking global", "Valor": f"#{rank_global}" if pd.notna(rank_global) else "NA"},
@@ -977,6 +1058,14 @@ with tab_eps:
             {
                 "Indicador": "Tasa reclamos 10k",
                 "Valor": f"{tasa_reclamos_global:.2f}" if pd.notna(tasa_reclamos_global) else "NA",
+            },
+            {
+                "Indicador": "Score CxP/Ingresos",
+                "Valor": f"{score_cxp_global:.1f}" if pd.notna(score_cxp_global) else "NA",
+            },
+            {
+                "Indicador": "CxP/Ingresos",
+                "Valor": f"{cxp_over_rev_global:.2%}" if pd.notna(cxp_over_rev_global) else "NA",
             },
         ]
     )
@@ -1035,14 +1124,18 @@ with tab_eps:
         "Score_Riesgo",
         "Score_Mercado",
         "Score_Reclamos",
+        "Score_CxP_REV",
         "Tasa_Reclamos_10k",
         "Reclamos",
+        "CxP_over_REV",
         "MarketShare_Valle",
     ] + PROBABILITY_COLUMNS + [
         "prob_imputada",
         "motivo_imputacion",
         "reclamos_imputado",
         "motivo_imputacion_reclamos",
+        "cxp_rev_imputado",
+        "motivo_imputacion_cxp_rev",
     ]
     eps_probs = (
         ranking_escenario[ranking_escenario["EPS"] == selected_eps][eps_prob_cols]
@@ -1056,13 +1149,16 @@ with tab_eps:
         eps_probs["Riesgo"] = eps_probs["Score_Final"].map(risk_bucket)
         eps_probs["prob_imputada"] = eps_probs["prob_imputada"].map({True: "Si", False: "No"})
         eps_probs["reclamos_imputado"] = eps_probs["reclamos_imputado"].map({True: "Si", False: "No"})
+        eps_probs["cxp_rev_imputado"] = eps_probs["cxp_rev_imputado"].map({True: "Si", False: "No"})
         eps_fmt = {
             "Score_Final": "{:.1f}",
             "Score_Riesgo": "{:.1f}",
             "Score_Mercado": "{:.1f}",
             "Score_Reclamos": "{:.1f}",
+            "Score_CxP_REV": "{:.1f}",
             "Tasa_Reclamos_10k": "{:.2f}",
             "Reclamos": "{:,.0f}",
+            "CxP_over_REV": "{:.2%}",
             "MarketShare_Valle": "{:.2%}",
         }
         eps_fmt.update({col: "{:.2%}" for col in PROBABILITY_COLUMNS})

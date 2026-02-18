@@ -11,6 +11,7 @@ def test_probability_columns_excludes_cashdays_zero() -> None:
         "P_avg_PA_ratio_lt_1",
         "P_avg_RI_ratio_lt_1",
         "P_avg_CashDays_lt_15",
+        "P_avg_PayDays_out_20_70",
     ]
 
 
