@@ -26,6 +26,7 @@ from dashboards.ui import (
     section_header,
     style_chart,
 )
+from src.models.eps_scoring import RATIO_SPECS, build_blocks_long, compute_ratios
 
 try:
     from src.models import eps_montecarlo as eps_montecarlo_model
@@ -78,6 +79,53 @@ def _fallback_build_eps_historical_compliance(
     )
 
 
+def _fallback_run_eps_montecarlo_backtesting(
+    upc_df: pd.DataFrame,
+    eps_eeff_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    eps_afiliados_hist_df: pd.DataFrame,
+    eps_obj: list[str] | None = None,
+    **kwargs: Any,
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    _ = (upc_df, eps_eeff_df, eps_edad_df, eps_afiliados_hist_df, eps_obj, kwargs)
+    detail = pd.DataFrame(
+        columns=[
+            "EPS",
+            "AnchorYear",
+            "TargetYear",
+            "Metric",
+            "PredictedProb",
+            "ObservedBreach",
+            "AbsError",
+            "Brier",
+        ]
+    )
+    summary = pd.DataFrame(
+        columns=["Metric", "N", "PredictedMean", "ObservedRate", "MAE", "Brier"]
+    )
+    diagnostics = {"reason": "funcion_backtesting_no_disponible_en_modelo"}
+    return detail, summary, diagnostics
+
+
+def _fallback_run_eps_seed_stability(
+    upc_df: pd.DataFrame,
+    eps_eeff_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    eps_afiliados_hist_df: pd.DataFrame,
+    market_share_df: pd.DataFrame,
+    **kwargs: Any,
+) -> Dict[str, pd.DataFrame]:
+    _ = (upc_df, eps_eeff_df, eps_edad_df, eps_afiliados_hist_df, market_share_df, kwargs)
+    return {
+        "per_seed_global": pd.DataFrame(),
+        "per_seed_escenario": pd.DataFrame(),
+        "pairwise_global": pd.DataFrame(),
+        "pairwise_escenario": pd.DataFrame(),
+        "summary_global": pd.DataFrame(),
+        "summary_escenario": pd.DataFrame(),
+    }
+
+
 compute_cxp_revenue_score = getattr(
     eps_montecarlo_model,
     "compute_cxp_revenue_score",
@@ -87,6 +135,16 @@ build_eps_historical_compliance = getattr(
     eps_montecarlo_model,
     "build_eps_historical_compliance",
     _fallback_build_eps_historical_compliance,
+)
+run_eps_montecarlo_backtesting = getattr(
+    eps_montecarlo_model,
+    "run_eps_montecarlo_backtesting",
+    _fallback_run_eps_montecarlo_backtesting,
+)
+run_eps_seed_stability = getattr(
+    eps_montecarlo_model,
+    "run_eps_seed_stability",
+    _fallback_run_eps_seed_stability,
 )
 
 st.set_page_config(page_title="Clientes", layout="wide")
@@ -111,6 +169,21 @@ def get_eps_universe() -> list[str]:
 
 def normalize_sheet_name(text: object) -> str:
     return re.sub(r"[^a-z0-9]", "", normalize_account(text))
+
+
+def parse_seed_values(text: str) -> List[int]:
+    raw_parts = re.split(r"[,\s;]+", str(text).strip())
+    seeds: List[int] = []
+    for part in raw_parts:
+        if not part:
+            continue
+        try:
+            value = int(part)
+        except ValueError:
+            continue
+        seeds.append(value)
+    unique = sorted(set(seeds))
+    return unique
 
 
 def parse_age_group(text: object) -> str | None:
@@ -181,6 +254,207 @@ def percentile_score(values: pd.Series, low_is_better: bool) -> pd.Series:
         score = (rank / (n - 1.0)) * 100.0
     out.loc[valid.index] = score
     return out
+
+
+EPS_RATIO_LABELS: Dict[str, str] = {
+    "current_ratio": "Razon corriente",
+    "cash_ratio": "Razon de caja",
+    "wc_to_rev": "Capital de trabajo neto / REV",
+    "days_cash": "Dias de caja (proxy)",
+    "current_assets_ratio": "Activos corrientes / Activos totales",
+    "debt_to_assets": "Deuda total / Activos",
+    "equity_ratio": "Patrimonio / Activos",
+    "assets_to_liabilities": "Activos / Pasivos totales",
+    "current_liab_share": "Peso del corto plazo",
+    "net_debt_to_ebitda": "Deuda neta CP / EBITDA",
+    "gross_margin": "Margen bruto",
+    "ebitda_margin": "Margen EBITDA",
+    "ebit_margin": "Margen operativo (EBIT)",
+    "net_margin": "Margen neto",
+    "roa": "ROA",
+    "asset_turnover": "Rotacion de activos",
+    "dso": "DSO (dias de cartera)",
+    "dpo": "DPO (dias de proveedores)",
+    "opex_cash_ratio": "Indice OPEX en efectivo",
+    "da_intensity": "Intensidad dep/amort",
+}
+
+EPS_RATIO_KINDS: Dict[str, str] = {
+    "current_ratio": "x",
+    "cash_ratio": "x",
+    "wc_to_rev": "percent",
+    "days_cash": "days",
+    "current_assets_ratio": "percent",
+    "debt_to_assets": "percent",
+    "equity_ratio": "percent",
+    "assets_to_liabilities": "x",
+    "current_liab_share": "percent",
+    "net_debt_to_ebitda": "x",
+    "gross_margin": "percent",
+    "ebitda_margin": "percent",
+    "ebit_margin": "percent",
+    "net_margin": "percent",
+    "roa": "percent",
+    "asset_turnover": "x",
+    "dso": "days",
+    "dpo": "days",
+    "opex_cash_ratio": "percent",
+    "da_intensity": "percent",
+}
+
+EPS_RATIO_GROUPS: Dict[str, List[str]] = {
+    "Liquidez": ["current_ratio", "cash_ratio", "wc_to_rev", "days_cash", "current_assets_ratio"],
+    "Solvencia": ["debt_to_assets", "equity_ratio", "assets_to_liabilities", "current_liab_share", "net_debt_to_ebitda"],
+    "Rentabilidad": ["gross_margin", "ebitda_margin", "ebit_margin", "net_margin", "roa"],
+    "Eficiencia": ["asset_turnover", "dso", "dpo", "opex_cash_ratio", "da_intensity"],
+}
+
+
+def format_ratio_value(value: float | None, kind: str) -> str:
+    if value is None or pd.isna(value):
+        return "NA"
+    if kind == "percent":
+        return f"{value * 100:.2f}%"
+    if kind == "days":
+        return f"{value:,.1f} dias"
+    if kind == "x":
+        return f"{value:.2f}x"
+    return f"{value:,.2f}"
+
+
+def normalize_eps_key(text: object) -> str:
+    normalized = normalize_account(text)
+    tokens = [tok for tok in normalized.split() if tok != "eps"]
+    return " ".join(tokens).strip()
+
+
+def canonicalize_eps_name(text: object, eps_universe: List[str]) -> str | None:
+    raw_norm = normalize_account(text)
+    raw_key = normalize_eps_key(text)
+    exact_map = {normalize_account(eps): eps for eps in eps_universe}
+    key_map = {normalize_eps_key(eps): eps for eps in eps_universe}
+
+    if raw_norm in exact_map:
+        return exact_map[raw_norm]
+    if raw_key in key_map:
+        return key_map[raw_key]
+
+    if raw_key:
+        for key, eps in key_map.items():
+            if raw_key and (raw_key in key or key in raw_key):
+                return eps
+    return None
+
+
+def build_eps_ratio_dataset(
+    eps_eeff_df: pd.DataFrame,
+    eps_universe: List[str],
+) -> tuple[pd.DataFrame, List[int]]:
+    if eps_eeff_df.empty:
+        return pd.DataFrame(), []
+
+    cols = [str(c) for c in eps_eeff_df.columns]
+    eps_col = find_col(cols, ["eps"])
+    cuenta_col = find_col(cols, ["cuenta"])
+    year_cols = sorted(
+        [c for c in eps_eeff_df.columns if str(c).strip().isdigit()],
+        key=lambda c: int(str(c).strip()),
+    )
+
+    if eps_col is None or cuenta_col is None or not year_cols:
+        return pd.DataFrame(), []
+
+    work = eps_eeff_df[[eps_col, cuenta_col] + year_cols].copy()
+    work["EPS_clean"] = work[eps_col].map(lambda x: canonicalize_eps_name(x, eps_universe))
+    work = work[work["EPS_clean"].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(), []
+
+    work["CUENTA"] = work[cuenta_col].astype(str)
+    blocks_df = build_blocks_long(
+        df=work,
+        year_cols=year_cols,
+        entity_col="EPS_clean",
+        account_col="CUENTA",
+    )
+    ratios_df = compute_ratios(blocks_df)
+    if ratios_df.empty:
+        return pd.DataFrame(), []
+
+    ratios_df["entity"] = ratios_df["entity"].astype(str).str.strip()
+    ratios_df = ratios_df[ratios_df["entity"].isin(eps_universe)].copy()
+    ratios_df["year"] = pd.to_numeric(ratios_df["year"], errors="coerce")
+    ratios_df = ratios_df[ratios_df["year"].notna()].copy()
+    ratios_df["year"] = ratios_df["year"].astype(int)
+    ratios_df = ratios_df.sort_values(["entity", "year"]).reset_index(drop=True)
+    years = sorted(ratios_df["year"].unique().tolist())
+    return ratios_df, years
+
+
+def build_eps_ratio_table(
+    ratios_df: pd.DataFrame,
+    selected_eps: str,
+    ratio_list: List[str],
+    years: List[int],
+) -> pd.DataFrame:
+    if ratios_df.empty:
+        return pd.DataFrame(columns=["Indicador"] + [str(y) for y in years] + ["Promedio"])
+
+    subset = ratios_df[ratios_df["entity"] == selected_eps]
+    rows: List[Dict[str, Any]] = []
+    for ratio in ratio_list:
+        if ratio not in ratios_df.columns:
+            continue
+        kind = EPS_RATIO_KINDS.get(ratio, "ratio")
+        row: Dict[str, Any] = {"Indicador": EPS_RATIO_LABELS.get(ratio, ratio)}
+        values: List[float] = []
+        for year in years:
+            year_values = pd.to_numeric(
+                subset.loc[subset["year"] == int(year), ratio],
+                errors="coerce",
+            ).dropna()
+            value = float(year_values.mean()) if not year_values.empty else np.nan
+            row[str(year)] = format_ratio_value(value, kind)
+            if pd.notna(value):
+                values.append(value)
+        mean_value = float(np.mean(values)) if values else np.nan
+        row["Promedio"] = format_ratio_value(mean_value, kind)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def build_eps_indicator_comparison(
+    ratios_df: pd.DataFrame,
+    indicator: str,
+    period: str,
+) -> pd.DataFrame:
+    if ratios_df.empty or indicator not in ratios_df.columns:
+        return pd.DataFrame(columns=["EPS", "Valor", "Periodo"])
+
+    base = ratios_df[["entity", "year", indicator]].copy()
+    base[indicator] = pd.to_numeric(base[indicator], errors="coerce")
+    base = base.dropna(subset=[indicator])
+    if base.empty:
+        return pd.DataFrame(columns=["EPS", "Valor", "Periodo"])
+
+    if period == "Promedio":
+        comp = (
+            base.groupby("entity", as_index=False)[indicator]
+            .mean()
+            .rename(columns={"entity": "EPS", indicator: "Valor"})
+        )
+        comp["Periodo"] = "Promedio"
+        return comp
+
+    year = int(period)
+    comp = (
+        base[base["year"] == year]
+        .groupby("entity", as_index=False)[indicator]
+        .mean()
+        .rename(columns={"entity": "EPS", indicator: "Valor"})
+    )
+    comp["Periodo"] = str(year)
+    return comp
 
 
 def build_composite_ranking_local(
@@ -466,6 +740,19 @@ def render_score_methodology() -> None:
         (
             "Cada metrica `m` produce una probabilidad promedio `P_avg`. Luego estas probabilidades "
             "se convierten a score por percentiles invertidos (menor probabilidad = mayor score)."
+        )
+    )
+
+    divider()
+    st.markdown("**6) Robustez del modelo: backtesting y estabilidad por semilla**")
+    st.latex(r"Brier_m=\frac{1}{n}\sum_{i=1}^{n}\left(\hat p_{i,m}-y_{i,m}\right)^2")
+    st.latex(r"MAE_m=\frac{1}{n}\sum_{i=1}^{n}\left|\hat p_{i,m}-y_{i,m}\right|")
+    st.latex(r"\rho_{Spearman}=corr\left(rank(Ranking^{seed_a}),rank(Ranking^{seed_b})\right)")
+    st.markdown(
+        (
+            "El backtesting se hace 1-step ahead: se ancla en anos historicos y se compara la probabilidad "
+            "predicha contra el incumplimiento observado en el ano siguiente. "
+            "La estabilidad por semilla compara rankings entre corridas con semillas distintas usando Spearman."
         )
     )
 
@@ -849,6 +1136,31 @@ with st.sidebar:
         stress_mix_lr_shift = float(st.number_input("STRESS_MIX LR shift", value=0.05, step=0.01, format="%.2f"))
         stress_mix_g_shift = float(st.number_input("STRESS_MIX g shift", value=-0.03, step=0.01, format="%.2f"))
 
+    st.subheader("Robustez del modelo")
+    robustness_n_sim = int(
+        st.number_input(
+            "N sim robustez (backtesting/semillas)",
+            min_value=500,
+            max_value=20_000,
+            value=3_000,
+            step=500,
+        )
+    )
+    backtest_start_year = int(
+        st.number_input(
+            "Ano inicio backtesting",
+            min_value=2018,
+            max_value=2030,
+            value=2021,
+            step=1,
+        )
+    )
+    seeds_input = st.text_input(
+        "Semillas (coma separadas)",
+        value="7, 42, 77, 123, 2026",
+    )
+    run_robustness = st.button("Ejecutar robustez")
+
     st.caption(
         "Score final: 55% riesgo Monte Carlo + 5% mercado Valle + 20% reclamos + 20% CxP/Ingresos."
     )
@@ -947,7 +1259,78 @@ ranking_global_exec["Imputada_CxP"] = ranking_global_exec["cxp_rev_imputado"].ma
     {True: "Si", False: "No"}
 )
 
-tab_analisis, tab_datos, tab_eps = st.tabs(["Analisis", "Datos", "Analisis EPS"])
+robustness_seeds = parse_seed_values(seeds_input)
+if len(robustness_seeds) < 2:
+    robustness_seeds = [7, 42]
+
+robustness_state_key = "clientes_robustness_v1"
+if run_robustness:
+    with st.spinner("Ejecutando backtesting y estabilidad por semilla..."):
+        backtest_detail_df, backtest_summary_df, backtest_diag = run_eps_montecarlo_backtesting(
+            upc_df=upc_df,
+            eps_eeff_df=eps_eeff_df,
+            eps_edad_df=eps_edad_df,
+            eps_afiliados_hist_df=eps_anos_df,
+            eps_obj=eps_universe,
+            n_sim=robustness_n_sim,
+            cash_thresholds=(15,),
+            paydays_range=(20.0, 70.0),
+            upc_optimism_factor=upc_optimism_factor,
+            upc_growth_start_year=upc_growth_start_year,
+            upc_growth_end_year=upc_growth_end_year,
+            start_anchor_year=backtest_start_year,
+            random_seed=42,
+        )
+        stability_out = run_eps_seed_stability(
+            upc_df=upc_df,
+            eps_eeff_df=eps_eeff_df,
+            eps_edad_df=eps_edad_df,
+            eps_afiliados_hist_df=eps_anos_df,
+            market_share_df=market_share_df,
+            reclamos_score_df=reclamos_scored_df,
+            cxp_score_df=cxp_scored_df,
+            eps_obj=eps_universe,
+            seeds=robustness_seeds,
+            n_sim=robustness_n_sim,
+            horizon_end=horizon_end,
+            cash_thresholds=(15,),
+            paydays_range=(20.0, 70.0),
+            upc_optimism_factor=upc_optimism_factor,
+            upc_growth_start_year=upc_growth_start_year,
+            upc_growth_end_year=upc_growth_end_year,
+            scenarios=scenarios,
+            risk_weight=0.55,
+            market_weight=0.05,
+            complaints_weight=0.2,
+            cxp_rev_weight=0.2,
+        )
+        st.session_state[robustness_state_key] = {
+            "backtest_detail": backtest_detail_df,
+            "backtest_summary": backtest_summary_df,
+            "backtest_diag": backtest_diag,
+            "stability_out": stability_out,
+            "params": {
+                "n_sim": robustness_n_sim,
+                "start_anchor_year": backtest_start_year,
+                "seeds": robustness_seeds,
+            },
+        }
+
+robustness_payload = st.session_state.get(robustness_state_key)
+
+eps_ratios_df, eps_ratio_years = build_eps_ratio_dataset(
+    eps_eeff_df=eps_eeff_df,
+    eps_universe=eps_universe,
+)
+available_ratio_indicators = [
+    ratio
+    for ratio in EPS_RATIO_LABELS.keys()
+    if ratio in eps_ratios_df.columns and not pd.to_numeric(eps_ratios_df[ratio], errors="coerce").dropna().empty
+]
+
+tab_analisis, tab_datos, tab_eps, tab_comp = st.tabs(
+    ["Analisis", "Datos", "Analisis EPS", "Comparacion"]
+)
 
 with tab_analisis:
     section_header("Resumen ejecutivo", "Ranking Monte Carlo + mercado Valle + reclamos + CxP/Ingresos")
@@ -1155,6 +1538,123 @@ with tab_analisis:
         hide_index=True,
     )
 
+    divider()
+    section_header(
+        "Robustez del modelo",
+        "Backtesting historico + estabilidad por semilla (Spearman de rankings)",
+    )
+    if robustness_payload is None:
+        st.info(
+            "Ejecuta 'Robustez del modelo' en el sidebar para calcular backtesting y estabilidad por semilla."
+        )
+    else:
+        params_view = pd.DataFrame(
+            [
+                {
+                    "Parametro": "N sim robustez",
+                    "Valor": robustness_payload.get("params", {}).get("n_sim"),
+                },
+                {
+                    "Parametro": "Ano inicio backtesting",
+                    "Valor": robustness_payload.get("params", {}).get("start_anchor_year"),
+                },
+                {
+                    "Parametro": "Semillas",
+                    "Valor": ", ".join(str(x) for x in robustness_payload.get("params", {}).get("seeds", [])),
+                },
+            ]
+        )
+        st.dataframe(params_view, width="stretch", hide_index=True)
+
+        backtest_summary_df = robustness_payload.get("backtest_summary", pd.DataFrame()).copy()
+        backtest_detail_df = robustness_payload.get("backtest_detail", pd.DataFrame()).copy()
+        backtest_diag = robustness_payload.get("backtest_diag", {})
+
+        st.markdown("**Backtesting (1-step ahead)**")
+        if backtest_summary_df.empty:
+            st.info("No se pudo construir backtesting con la historia disponible.")
+        else:
+            st.dataframe(
+                backtest_summary_df.style.format(
+                    {
+                        "PredictedMean": "{:.2%}",
+                        "ObservedRate": "{:.2%}",
+                        "MAE": "{:.2%}",
+                        "Brier": "{:.4f}",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            backtest_resume = pd.DataFrame(
+                [
+                    {
+                        "Indicador": "Ventanas anchor usadas",
+                        "Valor": len(backtest_diag.get("anchors_used", [])),
+                    },
+                    {
+                        "Indicador": "Observaciones evaluadas",
+                        "Valor": int(len(backtest_detail_df)),
+                    },
+                    {
+                        "Indicador": "MAE promedio",
+                        "Valor": f"{backtest_summary_df['MAE'].mean():.2%}",
+                    },
+                    {
+                        "Indicador": "Brier promedio",
+                        "Valor": f"{backtest_summary_df['Brier'].mean():.4f}",
+                    },
+                ]
+            )
+            st.dataframe(backtest_resume, width="stretch", hide_index=True)
+
+        stability_out = robustness_payload.get("stability_out", {})
+        global_summary_df = stability_out.get("summary_global", pd.DataFrame()).copy()
+        pairwise_global_df = stability_out.get("pairwise_global", pd.DataFrame()).copy()
+        escenario_summary_df = stability_out.get("summary_escenario", pd.DataFrame()).copy()
+
+        divider()
+        st.markdown("**Estabilidad por semilla (Spearman)**")
+        if global_summary_df.empty:
+            st.info("No se pudo calcular estabilidad por semilla.")
+        else:
+            st.dataframe(
+                global_summary_df.style.format(
+                    {
+                        "Mean": "{:.3f}",
+                        "Min": "{:.3f}",
+                        "Max": "{:.3f}",
+                    }
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+            if not pairwise_global_df.empty:
+                st.caption("Detalle pairwise global entre semillas")
+                st.dataframe(
+                    pairwise_global_df.style.format(
+                        {
+                            "Spearman_Score_Final": "{:.3f}",
+                            "Spearman_Ranking_Global": "{:.3f}",
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+            if not escenario_summary_df.empty:
+                st.caption("Resumen Spearman por escenario")
+                st.dataframe(
+                    escenario_summary_df.style.format(
+                        {
+                            "Mean": "{:.3f}",
+                            "Min": "{:.3f}",
+                            "Max": "{:.3f}",
+                        }
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
     with st.expander("Ver detalle tecnico de probabilidades"):
         section_header("Probabilidades base", "PROMEDIO por escenario")
         explain_box(
@@ -1329,6 +1829,30 @@ with tab_eps:
     )
     st.dataframe(resumen_eps, width="stretch", hide_index=True)
 
+    divider()
+    section_header(
+        "Indicadores financieros historicos (EPS)",
+        "Misma metodologia de ratios usada en Analisis IPS",
+    )
+    if eps_ratios_df.empty or not eps_ratio_years:
+        st.info("No hay informacion suficiente en EPS_EEFF para calcular indicadores financieros EPS.")
+    else:
+        ratio_tabs = st.tabs(["Liquidez", "Solvencia", "Rentabilidad", "Eficiencia"])
+        ratio_tab_order = ["Liquidez", "Solvencia", "Rentabilidad", "Eficiencia"]
+        for ratio_tab, group_name in zip(ratio_tabs, ratio_tab_order):
+            with ratio_tab:
+                table = build_eps_ratio_table(
+                    ratios_df=eps_ratios_df,
+                    selected_eps=selected_eps,
+                    ratio_list=EPS_RATIO_GROUPS[group_name],
+                    years=eps_ratio_years,
+                )
+                if table.empty:
+                    st.info(f"No hay datos para {group_name.lower()} en la EPS seleccionada.")
+                else:
+                    st.dataframe(table, width="stretch", hide_index=True)
+
+    divider()
     section_header("Estado de resultados (anual)")
     income_df = build_income_statement_view(diagnostics["base_eps"], selected_eps)
     if income_df.empty:
@@ -1434,3 +1958,74 @@ with tab_eps:
     st.caption(eps_anos_src)
     st.caption(eps_afiliados_src)
     st.caption(reclamos_src)
+
+with tab_comp:
+    section_header(
+        "Comparacion de indicadores EPS",
+        "Selector dinamico por indicador para comparar todas las EPS",
+    )
+    if eps_ratios_df.empty or not available_ratio_indicators:
+        st.info("No hay informacion suficiente para construir la comparacion de indicadores EPS.")
+    else:
+        c_ind, c_per = st.columns([2, 1])
+        selected_indicator = c_ind.selectbox(
+            "Indicador financiero",
+            available_ratio_indicators,
+            format_func=lambda key: EPS_RATIO_LABELS.get(key, key),
+        )
+        period_options = ["Promedio"] + [str(year) for year in eps_ratio_years]
+        selected_period = c_per.selectbox("Periodo", period_options, index=0)
+
+        compare_df = build_eps_indicator_comparison(
+            ratios_df=eps_ratios_df,
+            indicator=selected_indicator,
+            period=selected_period,
+        )
+        if compare_df.empty:
+            st.info("No hay datos para ese indicador en el periodo seleccionado.")
+        else:
+            direction = RATIO_SPECS.get(selected_indicator, {}).get("direction", "higher")
+            if direction == "lower":
+                compare_df["Orden"] = compare_df["Valor"]
+                compare_df = compare_df.sort_values(["Orden", "EPS"], ascending=[True, True]).reset_index(drop=True)
+                direction_msg = "Sentido del indicador: menor valor es mejor."
+            elif direction == "range":
+                target_mid = 40.0
+                compare_df["Orden"] = (compare_df["Valor"] - target_mid).abs()
+                compare_df = compare_df.sort_values(["Orden", "EPS"], ascending=[True, True]).reset_index(drop=True)
+                direction_msg = "Sentido del indicador: mejor cuando esta cerca del rango objetivo de dias."
+            else:
+                compare_df["Orden"] = compare_df["Valor"]
+                compare_df = compare_df.sort_values(["Orden", "EPS"], ascending=[False, True]).reset_index(drop=True)
+                direction_msg = "Sentido del indicador: mayor valor es mejor."
+
+            compare_df["Ranking"] = np.arange(1, len(compare_df) + 1)
+            ratio_kind = EPS_RATIO_KINDS.get(selected_indicator, "ratio")
+            compare_table = compare_df.copy()
+            compare_table["Valor"] = compare_table["Valor"].map(
+                lambda val: format_ratio_value(val, ratio_kind)
+            )
+            st.caption(direction_msg)
+            st.dataframe(
+                compare_table[["Ranking", "EPS", "Valor", "Periodo"]],
+                width="stretch",
+                hide_index=True,
+            )
+
+            plot_df = compare_df.sort_values("Ranking", ascending=False)
+            fig = px.bar(
+                plot_df,
+                x="Valor",
+                y="EPS",
+                orientation="h",
+                title=f"{EPS_RATIO_LABELS.get(selected_indicator, selected_indicator)} - {selected_period}",
+                labels={"Valor": EPS_RATIO_LABELS.get(selected_indicator, selected_indicator), "EPS": "EPS"},
+            )
+            if ratio_kind == "percent":
+                fig.update_xaxes(tickformat=".1%")
+            elif ratio_kind == "days":
+                fig.update_xaxes(tickformat=",.0f")
+            elif ratio_kind == "x":
+                fig.update_xaxes(tickformat=".2f")
+            fig = style_chart(fig)
+            chart_container(fig)

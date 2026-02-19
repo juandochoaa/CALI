@@ -125,7 +125,29 @@ def _empty_snapshot(
     return payload
 
 
-def _build_formula_view() -> pd.DataFrame:
+def _build_formula_view(method: str = "legacy") -> pd.DataFrame:
+    if method == "comparacion_desglose":
+        return pd.DataFrame(
+            {
+                "Campo": [
+                    "TAM por grupo de edad",
+                    "TAM total",
+                    "Factor de captura Santander",
+                    "SOM por grupo de edad",
+                    "Poblacion objetivo (operativa)",
+                    "Nota de implementacion",
+                ],
+                "Formula": [
+                    "TAM_g = Afiliados_g * Prev_g",
+                    "TAM = sum_g(TAM_g)",
+                    "alpha = Atendidos_Santander / Afiliados_Santander",
+                    "SOM_g = TAM_g * alpha",
+                    "Objetivo = sum_g(PacientesPorEdad_g)",
+                    "Pacientes por edad ya incorpora el factor de captura alpha.",
+                ],
+            }
+        )
+
     return pd.DataFrame(
         {
             "Campo": [
@@ -150,16 +172,127 @@ def _build_formula_view() -> pd.DataFrame:
     )
 
 
-def compute_target_population(
+def _compute_from_comparacion_desglose(
+    comparacion_df: pd.DataFrame,
+    prevalencia_df: pd.DataFrame,
+    warnings: list[str],
+) -> dict[str, Any] | None:
+    comp_cols = [str(c) for c in comparacion_df.columns]
+    pacientes_edad_col = find_col(comp_cols, ["pacientes", "edad"])
+    if not pacientes_edad_col:
+        return None
+
+    grupo_edad_col = find_col(comp_cols, ["grupo", "edad"])
+    if grupo_edad_col is None:
+        for col in comp_cols:
+            norm = normalize_text(col)
+            if "edad" in norm and "pacientes" not in norm:
+                grupo_edad_col = col
+                break
+
+    afiliados_valle_col = find_col(comp_cols, ["valle", "afiliados"])
+    afiliados_sant_col = find_col(comp_cols, ["santander", "afiliados"])
+    icb_col = find_col(comp_cols, ["icb", "atendidos"])
+    foscal_col = find_col(comp_cols, ["foscal", "atendidos"])
+
+    work = comparacion_df.copy()
+    if grupo_edad_col:
+        work["GrupoEdad"] = work[grupo_edad_col].astype(str).str.strip()
+        is_total = work["GrupoEdad"].map(normalize_text) == "total"
+        if is_total.any():
+            work = work[~is_total].copy()
+    else:
+        work["GrupoEdad"] = [f"Grupo {idx + 1}" for idx in range(len(work))]
+
+    work["PacientesPorEdad"] = pd.to_numeric(work[pacientes_edad_col], errors="coerce")
+    work = work[work["PacientesPorEdad"].notna()].copy()
+    if work.empty:
+        warnings.append(
+            "La hoja Comparacion_Desglose no tiene valores numericos validos en 'Pacientes por edad'."
+        )
+        return None
+
+    edad_chart_df = (
+        work.groupby("GrupoEdad", as_index=False)["PacientesPorEdad"]
+        .sum(min_count=1)
+        .sort_values("GrupoEdad")
+        .reset_index(drop=True)
+    )
+    objetivo = pd.to_numeric(edad_chart_df["PacientesPorEdad"], errors="coerce").sum(min_count=1)
+
+    edad_view = edad_chart_df.copy()
+    total_row = {
+        "GrupoEdad": "TOTAL",
+        "PacientesPorEdad": objetivo,
+    }
+    edad_view = pd.concat([edad_view, pd.DataFrame([total_row])], ignore_index=True)
+
+    sant_total = np.nan
+    valle_total = np.nan
+    atendidos_total = np.nan
+    pct_atendido = np.nan
+
+    if afiliados_sant_col and afiliados_valle_col and icb_col and foscal_col:
+        agg = comparacion_df.copy()
+        if grupo_edad_col:
+            agg["_grupo_norm"] = agg[grupo_edad_col].astype(str).map(normalize_text)
+            total_row_comp = agg[agg["_grupo_norm"] == "total"]
+            if not total_row_comp.empty:
+                row = total_row_comp.iloc[0]
+                sant_total = pd.to_numeric(row[afiliados_sant_col], errors="coerce")
+                valle_total = pd.to_numeric(row[afiliados_valle_col], errors="coerce")
+                atendidos_total = pd.to_numeric(row[icb_col], errors="coerce") + pd.to_numeric(
+                    row[foscal_col], errors="coerce"
+                )
+            else:
+                sant_total = pd.to_numeric(agg[afiliados_sant_col], errors="coerce").sum(min_count=1)
+                valle_total = pd.to_numeric(agg[afiliados_valle_col], errors="coerce").sum(min_count=1)
+                atendidos_total = pd.to_numeric(agg[icb_col], errors="coerce").sum(min_count=1) + pd.to_numeric(
+                    agg[foscal_col], errors="coerce"
+                ).sum(min_count=1)
+        else:
+            sant_total = pd.to_numeric(agg[afiliados_sant_col], errors="coerce").sum(min_count=1)
+            valle_total = pd.to_numeric(agg[afiliados_valle_col], errors="coerce").sum(min_count=1)
+            atendidos_total = pd.to_numeric(agg[icb_col], errors="coerce").sum(min_count=1) + pd.to_numeric(
+                agg[foscal_col], errors="coerce"
+            ).sum(min_count=1)
+
+        if pd.notna(atendidos_total) and pd.notna(sant_total) and sant_total > 0:
+            pct_atendido = atendidos_total / sant_total
+
+    summary_metrics = {
+        "pct_atendido_santander": pct_atendido,
+        "atendidos_santander": atendidos_total,
+        "posibles_atendidos_valle": objetivo,
+        "afiliados_valle_total": valle_total,
+        "afiliados_santander_total": sant_total,
+    }
+
+    metadata = {
+        "status": "warning" if warnings else "ok",
+        "method": "comparacion_desglose",
+        "objective_source_column": pacientes_edad_col,
+        "comparacion_columns": comp_cols,
+        "prevalencia_df": prevalencia_df,
+    }
+
+    return {
+        "summary_metrics": summary_metrics,
+        "eps_view": pd.DataFrame(),
+        "edad_view": edad_view,
+        "formula_view": _build_formula_view(method="comparacion_desglose"),
+        "edad_chart_df": edad_chart_df,
+        "warnings": warnings,
+        "metadata": metadata,
+    }
+
+
+def _compute_target_population_legacy(
     comparacion_df: pd.DataFrame,
     eps_edad_df: pd.DataFrame,
-    prevalencia_df_raw: pd.DataFrame,
+    prev_df: pd.DataFrame,
+    warnings: list[str],
 ) -> dict[str, Any]:
-    warnings: list[str] = []
-    prev_df = parse_prevalencia(prevalencia_df_raw)
-    if prev_df.empty:
-        warnings.append("No se pudo leer la tabla de prevalencia (GrupoEdad/Prevalencia).")
-
     if comparacion_df.empty:
         warnings.append("No se pudo leer la hoja Comparacion.")
         return _empty_snapshot(warnings, prevalencia_df=prev_df)
@@ -343,7 +476,7 @@ def compute_target_population(
                 edad_chart_df = grouped[["GrupoEdad", "PacientesPorEdad"]].copy()
 
                 edad_view = grouped.copy()
-                total_row = {
+                total_row_edad = {
                     "GrupoEdad": "TOTAL",
                     "Afiliados": edad_view["Afiliados"].sum(min_count=1),
                     "Prevalencia": np.nan,
@@ -352,7 +485,7 @@ def compute_target_population(
                     "Ponderacion": edad_view["Ponderacion"].sum(min_count=1),
                     "PacientesPorEdad": edad_view["PacientesPorEdad"].sum(min_count=1),
                 }
-                edad_view = pd.concat([edad_view, pd.DataFrame([total_row])], ignore_index=True)
+                edad_view = pd.concat([edad_view, pd.DataFrame([total_row_edad])], ignore_index=True)
 
             detected_edad_work = detected_edad
 
@@ -366,6 +499,8 @@ def compute_target_population(
 
     metadata = {
         "status": "warning" if warnings else "ok",
+        "method": "legacy",
+        "objective_source_column": "posibles_atendidos_valle",
         "comparacion_columns": comp_cols,
         "comparacion_detected": detected_comp,
         "eps_edad_columns": [str(c) for c in eps_edad_df.columns],
@@ -377,8 +512,40 @@ def compute_target_population(
         "summary_metrics": summary_metrics,
         "eps_view": eps_view,
         "edad_view": edad_view,
-        "formula_view": _build_formula_view(),
+        "formula_view": _build_formula_view(method="legacy"),
         "edad_chart_df": edad_chart_df,
         "warnings": warnings,
         "metadata": metadata,
     }
+
+
+def compute_target_population(
+    comparacion_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    prevalencia_df_raw: pd.DataFrame,
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    prev_df = parse_prevalencia(prevalencia_df_raw)
+    if prev_df.empty:
+        warnings.append("No se pudo leer la tabla de prevalencia (GrupoEdad/Prevalencia).")
+    if comparacion_df.empty:
+        warnings.append("No se pudo leer la hoja Comparacion_Desglose/Comparacion.")
+        return _empty_snapshot(warnings, prevalencia_df=prev_df)
+
+    result_desglose = _compute_from_comparacion_desglose(
+        comparacion_df=comparacion_df,
+        prevalencia_df=prev_df,
+        warnings=warnings.copy(),
+    )
+    if result_desglose is not None:
+        return result_desglose
+
+    warnings.append(
+        "No se encontro columna 'Pacientes por edad' en Comparacion_Desglose; se usa logica legacy."
+    )
+    return _compute_target_population_legacy(
+        comparacion_df=comparacion_df,
+        eps_edad_df=eps_edad_df,
+        prev_df=prev_df,
+        warnings=warnings,
+    )

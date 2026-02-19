@@ -40,7 +40,7 @@ apply_theme()
 
 page_header(
     "Proyecciones (EEFF)",
-    "Ingresos, costos, EBITDA, prevalencia y comparacion.",
+    "Ingresos, costos, EBITDA y market share por escenario.",
     "Financial outlook",
 )
 
@@ -307,13 +307,17 @@ def _filter_tarifas_by_target(
             nums = re.findall(r"\d+", norm)
             if nums and int(nums[0]) == target:
                 return True
+            if nums:
+                return False
             if target == 1:
                 return "santander" in norm
             if target == 2:
                 return ("bogota" in norm) and ("incremento" not in norm)
-            return ("bogota" in norm and "incremento" in norm) or (
-                "cali" in norm and "incremento" in norm
-            )
+            if target == 3:
+                return ("bogota" in norm and "incremento" in norm) or (
+                    "cali" in norm and "incremento" in norm
+                )
+            return False
 
         return work[work[scenario_col].map(match_scenario)].copy()
 
@@ -327,7 +331,32 @@ def _filter_tarifas_by_target(
             return work[
                 work[sede_col].map(normalize_text).str.contains("bogota", na=False)
             ].copy()
+        return pd.DataFrame(columns=work.columns)
     return work
+
+
+def detect_price_scenarios(tarifas_df: pd.DataFrame) -> List[str]:
+    fallback = ["Escenario 1", "Escenario 2", "Escenario 3"]
+    if tarifas_df.empty:
+        return fallback
+
+    cols = [str(c) for c in tarifas_df.columns]
+    scenario_col = find_col_any(cols, [["escenario"], ["scenario"], ["tipo"]])
+    if not scenario_col:
+        return fallback
+
+    series = tarifas_df[scenario_col].dropna().astype(str).str.strip()
+    if series.empty:
+        return fallback
+
+    scenario_map: dict[int, str] = {}
+    for value in series.tolist():
+        scenario_id = scenario_id_from_label(value)
+        if scenario_id not in scenario_map:
+            scenario_map[scenario_id] = value
+
+    ordered = [scenario_map[key] for key in sorted(scenario_map)]
+    return ordered if ordered else fallback
 
 
 def _normalize_tarifa_weights(df: pd.DataFrame) -> pd.DataFrame:
@@ -681,7 +710,7 @@ def parse_tarifas_escenarios(
     elif target == 2:
         grouped["OrigenServicio"] = "S2_original"
     else:
-        grouped["OrigenServicio"] = "S3_original"
+        grouped["OrigenServicio"] = f"S{target}_original"
 
     return grouped[
         [
@@ -991,7 +1020,7 @@ EEFF_DERIVED_ACCOUNTS = {
     "UTILIDADNETA",
 }
 
-PRICE_SCENARIOS = [
+DEFAULT_PRICE_SCENARIOS = [
     "Escenario 1",
     "Escenario 2",
     "Escenario 3",
@@ -1194,16 +1223,17 @@ def build_constructor_scenarios(
     proj_statement: pd.DataFrame,
     years: list[int],
     fixed_payment: float,
-    pct_revenue: float,
     pct_utility: float,
+    mix_fixed_payment: float,
+    mix_pct_utility: float,
 ) -> pd.DataFrame:
     ingresos = pd.to_numeric(proj_statement.loc["INGRESOS", years], errors="coerce")
     utilidad_base = pd.to_numeric(proj_statement.loc["UTILIDADNETA", years], errors="coerce")
 
     pago_fijo = pd.Series(float(fixed_payment), index=years, dtype=float)
-    pago_pct_ingresos = ingresos * float(pct_revenue)
     # Si la utilidad base es negativa, se asume pago cero para este esquema.
     pago_pct_utilidad = utilidad_base.clip(lower=0) * float(pct_utility)
+    pago_mix = float(mix_fixed_payment) + utilidad_base.clip(lower=0) * float(mix_pct_utility)
 
     out = pd.DataFrame(
         {
@@ -1211,13 +1241,31 @@ def build_constructor_scenarios(
             "Ingresos": ingresos.values,
             "UtilidadNeta_Base": utilidad_base.values,
             "Pago_Fijo": pago_fijo.values,
-            "Pago_PctIngresos": pago_pct_ingresos.values,
             "Pago_PctUtilidad": pago_pct_utilidad.values,
+            "Pago_Mix": pago_mix.values,
         }
     )
     out["UtilidadPost_Fijo"] = out["UtilidadNeta_Base"] - out["Pago_Fijo"]
-    out["UtilidadPost_PctIngresos"] = out["UtilidadNeta_Base"] - out["Pago_PctIngresos"]
     out["UtilidadPost_PctUtilidad"] = out["UtilidadNeta_Base"] - out["Pago_PctUtilidad"]
+    out["UtilidadPost_Mix"] = out["UtilidadNeta_Base"] - out["Pago_Mix"]
+    out["MargenNetoPost_Fijo"] = np.divide(
+        out["UtilidadPost_Fijo"],
+        out["Ingresos"],
+        out=np.full(len(out), np.nan, dtype=float),
+        where=pd.to_numeric(out["Ingresos"], errors="coerce").to_numpy(dtype=float) != 0,
+    )
+    out["MargenNetoPost_PctUtilidad"] = np.divide(
+        out["UtilidadPost_PctUtilidad"],
+        out["Ingresos"],
+        out=np.full(len(out), np.nan, dtype=float),
+        where=pd.to_numeric(out["Ingresos"], errors="coerce").to_numpy(dtype=float) != 0,
+    )
+    out["MargenNetoPost_Mix"] = np.divide(
+        out["UtilidadPost_Mix"],
+        out["Ingresos"],
+        out=np.full(len(out), np.nan, dtype=float),
+        where=pd.to_numeric(out["Ingresos"], errors="coerce").to_numpy(dtype=float) != 0,
+    )
     return out
 
 
@@ -1285,16 +1333,17 @@ def calibrate_constructor_percentages(
     discount_rate: float,
     perpetuity_growth: float,
     fixed_annual_payment: float,
+    mix_fixed_annual_payment: float,
 ) -> dict:
     warnings: list[str] = []
     result: dict[str, object] = {
         "vp_target": np.nan,
-        "vp_ingresos_base": np.nan,
+        "vp_mix_fixed_base": np.nan,
         "vp_utilidad_pos_base": np.nan,
-        "pct_revenue_auto": np.nan,
         "pct_utility_auto": np.nan,
-        "pct_revenue_auto_pct": np.nan,
+        "pct_mix_utility_auto": np.nan,
         "pct_utility_auto_pct": np.nan,
+        "pct_mix_utility_auto_pct": np.nan,
         "warnings": warnings,
     }
 
@@ -1307,7 +1356,6 @@ def calibrate_constructor_percentages(
         return result
 
     year_index = pd.to_numeric(constructor_df.get("Ano"), errors="coerce")
-    ingresos = pd.to_numeric(constructor_df.get("Ingresos"), errors="coerce")
     utilidad_base = pd.to_numeric(constructor_df.get("UtilidadNeta_Base"), errors="coerce")
     valid = year_index.notna()
     if not valid.any():
@@ -1315,10 +1363,10 @@ def calibrate_constructor_percentages(
         return result
 
     year_index = year_index.loc[valid].astype(int)
-    ingresos = ingresos.loc[valid]
     utilidad_pos = utilidad_base.loc[valid].clip(lower=0.0)
 
     fixed_series = pd.Series(float(fixed_annual_payment), index=year_index, dtype=float)
+    mix_fixed_series = pd.Series(float(mix_fixed_annual_payment), index=year_index, dtype=float)
     _, _, vp_target = perpetuity_pv(fixed_series, discount_rate, perpetuity_growth)
     result["vp_target"] = vp_target
 
@@ -1326,20 +1374,12 @@ def calibrate_constructor_percentages(
         warnings.append("No fue posible calcular el VP objetivo del pago fijo base.")
         return result
 
-    ingresos_series = pd.Series(ingresos.to_numpy(dtype=float), index=year_index)
     utilidad_pos_series = pd.Series(utilidad_pos.to_numpy(dtype=float), index=year_index)
 
-    _, _, vp_ingresos_base = perpetuity_pv(ingresos_series, discount_rate, perpetuity_growth)
+    _, _, vp_mix_fixed_base = perpetuity_pv(mix_fixed_series, discount_rate, perpetuity_growth)
     _, _, vp_utilidad_pos_base = perpetuity_pv(utilidad_pos_series, discount_rate, perpetuity_growth)
-    result["vp_ingresos_base"] = vp_ingresos_base
+    result["vp_mix_fixed_base"] = vp_mix_fixed_base
     result["vp_utilidad_pos_base"] = vp_utilidad_pos_base
-
-    if np.isfinite(vp_ingresos_base) and vp_ingresos_base > 0:
-        pct_revenue_auto = float(vp_target / vp_ingresos_base)
-        result["pct_revenue_auto"] = pct_revenue_auto
-        result["pct_revenue_auto_pct"] = pct_revenue_auto * 100.0
-    else:
-        warnings.append("No se pudo calibrar % ingresos: VP de ingresos no valido o no positivo.")
 
     if np.isfinite(vp_utilidad_pos_base) and vp_utilidad_pos_base > 0:
         pct_utility_auto = float(vp_target / vp_utilidad_pos_base)
@@ -1348,6 +1388,21 @@ def calibrate_constructor_percentages(
         if pct_utility_auto > 1.0:
             warnings.append(
                 "El % utilidades calibrado supera 100% para igualar VP."
+            )
+
+        vp_variable_target_mix = float(vp_target) - float(vp_mix_fixed_base)
+        if vp_variable_target_mix < 0:
+            warnings.append(
+                "El componente fijo del escenario mix ya supera el VP objetivo del pago fijo base."
+            )
+            pct_mix_utility_auto = 0.0
+        else:
+            pct_mix_utility_auto = float(vp_variable_target_mix / vp_utilidad_pos_base)
+        result["pct_mix_utility_auto"] = pct_mix_utility_auto
+        result["pct_mix_utility_auto_pct"] = pct_mix_utility_auto * 100.0
+        if pct_mix_utility_auto > 1.0:
+            warnings.append(
+                "El % utilidades calibrado del escenario mix supera 100%."
             )
     else:
         warnings.append("No se pudo calibrar % utilidades: VP de utilidad positiva no valido o no positivo.")
@@ -1616,7 +1671,7 @@ def _resolve_target_population_snapshot(
 
     metadata = snapshot.setdefault("metadata", {})
     metadata["sources"] = {
-        "comparacion": comp_source,
+        "comparacion_desglose": comp_source,
         "eps_edad": edad_source,
         "prevalencia": prev_source,
     }
@@ -1633,21 +1688,34 @@ def _resolve_target_population_snapshot(
 
 proj, proj_source = load_financials()
 prev_raw, prev_source = load_cifras_eps_raw("Prevalencia", header=None)
-th_raw_df, th_source = load_cifras_eps_raw("TH", header=None)
-comp_df, comp_source = load_cifras_eps("Comparacion")
+comp_df, comp_source = load_cifras_eps("Comparacion_Desglose")
+if comp_df.empty:
+    alt_comp_df, alt_comp_source = load_cifras_eps("Comparacion Desglose")
+    if not alt_comp_df.empty:
+        comp_df, comp_source = alt_comp_df, alt_comp_source
+if comp_df.empty:
+    alt_comp_df, alt_comp_source = load_cifras_eps("ComparacionDesglose")
+    if not alt_comp_df.empty:
+        comp_df, comp_source = alt_comp_df, alt_comp_source
+if comp_df.empty:
+    comp_df, comp_source = load_cifras_eps("Comparacion")
 edad_df, edad_source = load_cifras_eps("EPS_Edad")
 tarifas_esc_df, tarifas_esc_source = load_cifras_eps("Tarifas_Escenarios")
 if tarifas_esc_df.empty:
     alt_tarifas_esc_df, alt_tarifas_esc_source = load_cifras_eps("Tarifas Escenarios")
     if not alt_tarifas_esc_df.empty:
         tarifas_esc_df, tarifas_esc_source = alt_tarifas_esc_df, alt_tarifas_esc_source
+price_scenarios = detect_price_scenarios(tarifas_esc_df)
+if not price_scenarios:
+    price_scenarios = DEFAULT_PRICE_SCENARIOS
 sant_df, sant_source = load_cifras_eps("SANTANDER")
 if sant_df.empty:
     alt_sant_df, alt_sant_source = load_cifras_eps("EEFF_Santander")
     if not alt_sant_df.empty:
         sant_df, sant_source = alt_sant_df, alt_sant_source
 base_desglose_df, base_desglose_source = load_cifras_eps("BOGOTA_DESGLOSE")
-salary_comp = parse_salary_comparison_table(th_raw_df)
+th_source = "Tabla salarial de referencia (sin hoja TH)"
+salary_comp = parse_salary_comparison_table(pd.DataFrame())
 
 target_snapshot, objetivo_valle, target_snapshot_autogen = _resolve_target_population_snapshot(
     comp_df=comp_df,
@@ -1666,14 +1734,14 @@ if target_snapshot_autogen:
 proj_totals = pd.DataFrame()
 total_year1 = np.nan
 
-tab_eeff, tab_prev, tab_comp, tab_tar, tab_sant, tab_share = st.tabs(
-    ["EEFF", "Prevalencia", "Comparacion", "Tarifas", "Santander", "Market Share"]
-)
+tab_eeff, tab_tar, tab_share = st.tabs(["EEFF", "Tarifas", "Market Share"])
 
 with tab_eeff:
+    if "precio_scenario" in st.session_state and st.session_state["precio_scenario"] not in price_scenarios:
+        st.session_state["precio_scenario"] = price_scenarios[0]
     st.selectbox(
         "Escenario de precios",
-        PRICE_SCENARIOS,
+        price_scenarios,
         index=0,
         key="precio_scenario",
     )
@@ -1794,7 +1862,7 @@ with tab_eeff:
     if pd.isna(objetivo_valle):
         st.warning("No se pudo calcular el objetivo Valle (posibles atendidos).")
     else:
-        scenario = st.session_state.get("precio_scenario", PRICE_SCENARIOS[0])
+        scenario = st.session_state.get("precio_scenario", price_scenarios[0])
         proj_years = list(range(2026, 2031))
         growth_default = growth_avg
         if pd.isna(growth_default):
@@ -1805,8 +1873,8 @@ with tab_eeff:
         tariffs_serv, _ = selector_escenario_tarifas(
             scenario, tarifas_esc_df
         )
-        tarifas_s1, _ = selector_escenario_tarifas(PRICE_SCENARIOS[0], tarifas_esc_df)
-        tarifas_s2, _ = selector_escenario_tarifas(PRICE_SCENARIOS[1], tarifas_esc_df)
+        tarifas_s1, _ = selector_escenario_tarifas("Escenario 1", tarifas_esc_df)
+        tarifas_s2, _ = selector_escenario_tarifas("Escenario 2", tarifas_esc_df)
 
         if tariffs_serv.empty:
             tariffs_serv = tarifas_s1 if not tarifas_s1.empty else tarifas_s2
@@ -1838,7 +1906,7 @@ with tab_eeff:
                 st.stop()
             else:
                 scenario_income_rows: list[dict[str, object]] = []
-                for scenario_name in PRICE_SCENARIOS:
+                for scenario_name in price_scenarios:
                     tariffs_sc, _ = selector_escenario_tarifas(scenario_name, tarifas_esc_df)
                     if tariffs_sc.empty:
                         continue
@@ -2035,16 +2103,7 @@ with tab_eeff:
                     )
 
                 salary_source_label = str(salary_comp.get("source_label", th_source))
-                section_header("Comparacion salarial Cali vs nosotros", f"Fuente: {salary_source_label}")
                 salary_table = salary_comp.get("table", pd.DataFrame())
-                salary_warnings = salary_comp.get("warnings", [])
-                for warning_msg in salary_warnings:
-                    st.warning(str(warning_msg))
-                if salary_source_label != "Hoja TH":
-                    st.info(
-                        "Se esta usando la tabla salarial de referencia para calcular el aumento promedio "
-                        "de Nomina Asistencial."
-                    )
 
                 avg_salary_increase = pd.to_numeric(
                     salary_comp.get("mean_increase"), errors="coerce"
@@ -2053,38 +2112,7 @@ with tab_eeff:
                     1.0 + float(avg_salary_increase) if pd.notna(avg_salary_increase) else 1.0
                 )
 
-                if isinstance(salary_table, pd.DataFrame) and not salary_table.empty:
-                    role_col = str(salary_comp.get("role_col", salary_table.columns[0]))
-                    salary_cali_col = str(
-                        salary_comp.get("salary_col_cali", salary_table.columns[1])
-                    )
-                    salary_ours_col = str(
-                        salary_comp.get("salary_col_ours", salary_table.columns[2])
-                    )
-                    salary_view = salary_table[
-                        [
-                            role_col,
-                            salary_cali_col,
-                            salary_ours_col,
-                            "Salario_Cali",
-                            "Salario_Nosotros",
-                            "Aumento_Cali_vs_Nosotros",
-                            "Factor_Cali_vs_Nosotros",
-                        ]
-                    ].copy()
-                    st.dataframe(
-                        salary_view.style.format(
-                            {
-                                salary_cali_col: "{}",
-                                salary_ours_col: "{}",
-                                "Salario_Cali": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                                "Salario_Nosotros": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                                "Aumento_Cali_vs_Nosotros": lambda v: "" if pd.isna(v) else f"{v:.2%}",
-                                "Factor_Cali_vs_Nosotros": lambda v: "" if pd.isna(v) else f"{v:.4f}",
-                            }
-                        ),
-                        width="stretch",
-                    )
+                section_header("Ajuste de Nomina Asistencial", f"Fuente: {salary_source_label}")
                 m1, m2 = st.columns(2)
                 m1.metric(
                     "Promedio aumento Cali vs nosotros",
@@ -2095,8 +2123,8 @@ with tab_eeff:
                     f"{nomina_factor_auto:.4f}",
                 )
                 st.caption(
-                    "La tasa promedio de aumento salarial (Cali vs nosotros) se aplica como "
-                    "factor de NominaAsistencial = 1 + tasa."
+                    "La tabla salarial detallada se movio a Talento Humano. "
+                    "Aqui solo se aplica la tasa promedio sobre NominaAsistencial."
                 )
 
                 nomina_signature = (
@@ -2257,8 +2285,9 @@ with tab_eeff:
                         [
                             "Referencia de lote: minimo/promedio/maximo en COP por m2.",
                             "Caso base obligatorio: escenario Promedio (arriendo fijo mensual).",
-                            "Se calibra automaticamente % ingresos y % utilidades para igualar VP del pago fijo base.",
-                            "Si utilidad neta base es negativa, el pago por % utilidades se toma en 0.",
+                            "Se comparan tres escenarios: monto fijo, % utilidades y mix fijo + % utilidades.",
+                            "Se calibra automaticamente % utilidades para igualar VP del pago fijo base.",
+                            "Si utilidad neta base es negativa, el componente % utilidades se toma en 0.",
                         ],
                     )
 
@@ -2307,31 +2336,41 @@ with tab_eeff:
                         key="constructor_perpetuity_growth",
                     ) / 100.0
 
+                    if "constructor_fixed_payment_base" not in st.session_state:
+                        st.session_state["constructor_fixed_payment_base"] = float(fixed_payment)
+                    if "constructor_mix_fixed_payment" not in st.session_state:
+                        st.session_state["constructor_mix_fixed_payment"] = float(fixed_payment) * 0.5
+                    active_fixed_payment = float(st.session_state["constructor_fixed_payment_base"])
+                    active_mix_fixed_payment = float(st.session_state["constructor_mix_fixed_payment"])
+
                     constructor_base_df = build_constructor_scenarios(
                         proj_statement=proj_statement,
                         years=proj_years,
-                        fixed_payment=float(fixed_payment),
-                        pct_revenue=0.0,
+                        fixed_payment=active_fixed_payment,
                         pct_utility=0.0,
+                        mix_fixed_payment=active_mix_fixed_payment,
+                        mix_pct_utility=0.0,
                     )
                     calibration = calibrate_constructor_percentages(
                         constructor_df=constructor_base_df,
                         discount_rate=float(discount_rate),
                         perpetuity_growth=float(perpetuity_growth),
-                        fixed_annual_payment=float(fixed_payment),
+                        fixed_annual_payment=active_fixed_payment,
+                        mix_fixed_annual_payment=active_mix_fixed_payment,
                     )
 
-                    auto_pct_revenue = pd.to_numeric(
-                        calibration.get("pct_revenue_auto_pct"), errors="coerce"
-                    )
                     auto_pct_utility = pd.to_numeric(
                         calibration.get("pct_utility_auto_pct"), errors="coerce"
+                    )
+                    auto_pct_mix_utility = pd.to_numeric(
+                        calibration.get("pct_mix_utility_auto_pct"), errors="coerce"
                     )
                     flow_signature = (
                         tuple(pd.to_numeric(constructor_base_df["Ano"], errors="coerce").fillna(-1).astype(int).tolist()),
                         round(float(discount_rate), 10),
                         round(float(perpetuity_growth), 10),
-                        round(float(fixed_payment), 2),
+                        round(active_fixed_payment, 2),
+                        round(active_mix_fixed_payment, 2),
                         tuple(
                             np.round(
                                 pd.to_numeric(
@@ -2351,49 +2390,56 @@ with tab_eeff:
                     )
                     prev_signature = st.session_state.get("constructor_calibration_signature_v1")
                     if prev_signature != flow_signature:
-                        if pd.notna(auto_pct_revenue):
-                            st.session_state["constructor_pct_revenue"] = float(auto_pct_revenue)
                         if pd.notna(auto_pct_utility):
                             st.session_state["constructor_pct_utility"] = float(auto_pct_utility)
+                        if pd.notna(auto_pct_mix_utility):
+                            st.session_state["constructor_mix_pct_utility"] = float(auto_pct_mix_utility)
                         st.session_state["constructor_calibration_signature_v1"] = flow_signature
 
-                    if "constructor_pct_revenue" not in st.session_state:
-                        st.session_state["constructor_pct_revenue"] = (
-                            float(auto_pct_revenue) if pd.notna(auto_pct_revenue) else 0.0
-                        )
                     if "constructor_pct_utility" not in st.session_state:
                         st.session_state["constructor_pct_utility"] = (
                             float(auto_pct_utility) if pd.notna(auto_pct_utility) else 0.0
                         )
+                    if "constructor_mix_pct_utility" not in st.session_state:
+                        st.session_state["constructor_mix_pct_utility"] = (
+                            float(auto_pct_mix_utility) if pd.notna(auto_pct_mix_utility) else 0.0
+                        )
 
-                    s1, s2, s3 = st.columns(3)
+                    s1, s2, s3, s4 = st.columns(4)
                     s1.number_input(
-                        "Monto fijo anual base (COP)",
+                        "Monto fijo anual - Escenario fijo (COP)",
                         min_value=0.0,
-                        value=float(fixed_payment),
+                        value=float(st.session_state["constructor_fixed_payment_base"]),
                         step=50_000_000.0,
                         format="%.1f",
                         key="constructor_fixed_payment_base",
-                        disabled=True,
                     )
-                    pct_revenue_input = s2.number_input(
-                        "% sobre ingresos (editable)",
-                        min_value=0.0,
-                        value=float(st.session_state["constructor_pct_revenue"]),
-                        step=0.1,
-                        format="%.4f",
-                        key="constructor_pct_revenue",
-                    )
-                    pct_utility_input = s3.number_input(
-                        "% sobre utilidades (editable)",
+                    pct_utility_input = s2.number_input(
+                        "% utilidades - Escenario % utilidades",
                         min_value=0.0,
                         value=float(st.session_state["constructor_pct_utility"]),
                         step=0.1,
                         format="%.4f",
                         key="constructor_pct_utility",
                     )
-                    pct_revenue = float(pct_revenue_input) / 100.0
+                    s3.number_input(
+                        "Monto fijo anual - Escenario mix (COP)",
+                        min_value=0.0,
+                        value=float(st.session_state["constructor_mix_fixed_payment"]),
+                        step=50_000_000.0,
+                        format="%.1f",
+                        key="constructor_mix_fixed_payment",
+                    )
+                    mix_pct_utility_input = s4.number_input(
+                        "% utilidades - Escenario mix",
+                        min_value=0.0,
+                        value=float(st.session_state["constructor_mix_pct_utility"]),
+                        step=0.1,
+                        format="%.4f",
+                        key="constructor_mix_pct_utility",
+                    )
                     pct_utility = float(pct_utility_input) / 100.0
+                    mix_pct_utility = float(mix_pct_utility_input) / 100.0
 
                     if discount_rate <= perpetuity_growth:
                         st.warning(
@@ -2405,9 +2451,10 @@ with tab_eeff:
                     constructor_df = build_constructor_scenarios(
                         proj_statement=proj_statement,
                         years=proj_years,
-                        fixed_payment=float(fixed_payment),
-                        pct_revenue=float(pct_revenue),
+                        fixed_payment=float(st.session_state["constructor_fixed_payment_base"]),
                         pct_utility=float(pct_utility),
+                        mix_fixed_payment=float(st.session_state["constructor_mix_fixed_payment"]),
+                        mix_pct_utility=float(mix_pct_utility),
                     )
 
                     section_header("Comparacion anual de pagos y utilidad post-pago")
@@ -2417,11 +2464,14 @@ with tab_eeff:
                             "Ingresos",
                             "UtilidadNeta_Base",
                             "Pago_Fijo",
-                            "Pago_PctIngresos",
                             "Pago_PctUtilidad",
+                            "Pago_Mix",
                             "UtilidadPost_Fijo",
-                            "UtilidadPost_PctIngresos",
                             "UtilidadPost_PctUtilidad",
+                            "UtilidadPost_Mix",
+                            "MargenNetoPost_Fijo",
+                            "MargenNetoPost_PctUtilidad",
+                            "MargenNetoPost_Mix",
                         ]
                     ].copy()
                     st.dataframe(
@@ -2430,18 +2480,46 @@ with tab_eeff:
                                 "Ingresos": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                                 "UtilidadNeta_Base": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                                 "Pago_Fijo": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                                "Pago_PctIngresos": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                                 "Pago_PctUtilidad": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                                "Pago_Mix": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                                 "UtilidadPost_Fijo": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
-                                "UtilidadPost_PctIngresos": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
                                 "UtilidadPost_PctUtilidad": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                                "UtilidadPost_Mix": lambda v: "" if pd.isna(v) else f"${v:,.0f}",
+                                "MargenNetoPost_Fijo": lambda v: "" if pd.isna(v) else f"{v:.2%}",
+                                "MargenNetoPost_PctUtilidad": lambda v: "" if pd.isna(v) else f"{v:.2%}",
+                                "MargenNetoPost_Mix": lambda v: "" if pd.isna(v) else f"{v:.2%}",
                             }
                         ),
                         width="stretch",
                     )
 
+                    payment_plot = constructor_df[
+                        ["Ano", "Pago_Fijo", "Pago_PctUtilidad", "Pago_Mix"]
+                    ].melt(
+                        id_vars="Ano",
+                        var_name="Escenario",
+                        value_name="Pago",
+                    )
+                    payment_plot["Escenario"] = payment_plot["Escenario"].replace(
+                        {
+                            "Pago_Fijo": "Monto fijo",
+                            "Pago_PctUtilidad": "% utilidades",
+                            "Pago_Mix": "Mix fijo + % utilidades",
+                        }
+                    )
+                    fig_pay = px.line(
+                        payment_plot,
+                        x="Ano",
+                        y="Pago",
+                        color="Escenario",
+                        markers=True,
+                        title="Evolucion del pago al constructor por escenario",
+                    )
+                    fig_pay = style_chart(fig_pay)
+                    chart_container(fig_pay)
+
                     util_plot = constructor_df[
-                        ["Ano", "UtilidadPost_Fijo", "UtilidadPost_PctIngresos", "UtilidadPost_PctUtilidad"]
+                        ["Ano", "UtilidadPost_Fijo", "UtilidadPost_PctUtilidad", "UtilidadPost_Mix"]
                     ].melt(
                         id_vars="Ano",
                         var_name="Escenario",
@@ -2450,8 +2528,8 @@ with tab_eeff:
                     util_plot["Escenario"] = util_plot["Escenario"].replace(
                         {
                             "UtilidadPost_Fijo": "Monto fijo",
-                            "UtilidadPost_PctIngresos": "% ingresos",
                             "UtilidadPost_PctUtilidad": "% utilidades",
+                            "UtilidadPost_Mix": "Mix fijo + % utilidades",
                         }
                     )
                     fig_util = px.line(
@@ -2465,10 +2543,36 @@ with tab_eeff:
                     fig_util = style_chart(fig_util)
                     chart_container(fig_util)
 
+                    margin_plot = constructor_df[
+                        ["Ano", "MargenNetoPost_Fijo", "MargenNetoPost_PctUtilidad", "MargenNetoPost_Mix"]
+                    ].melt(
+                        id_vars="Ano",
+                        var_name="Escenario",
+                        value_name="MargenNetoPost",
+                    )
+                    margin_plot["Escenario"] = margin_plot["Escenario"].replace(
+                        {
+                            "MargenNetoPost_Fijo": "Monto fijo",
+                            "MargenNetoPost_PctUtilidad": "% utilidades",
+                            "MargenNetoPost_Mix": "Mix fijo + % utilidades",
+                        }
+                    )
+                    fig_margin = px.line(
+                        margin_plot,
+                        x="Ano",
+                        y="MargenNetoPost",
+                        color="Escenario",
+                        markers=True,
+                        title="Margen neto post-pago por escenario",
+                    )
+                    fig_margin.update_yaxes(tickformat=".1%")
+                    fig_margin = style_chart(fig_margin)
+                    chart_container(fig_margin)
+
                     scenario_defs = [
                         ("Monto fijo", "Pago_Fijo", "UtilidadPost_Fijo"),
-                        ("% ingresos", "Pago_PctIngresos", "UtilidadPost_PctIngresos"),
                         ("% utilidades", "Pago_PctUtilidad", "UtilidadPost_PctUtilidad"),
+                        ("Mix fijo + % utilidades", "Pago_Mix", "UtilidadPost_Mix"),
                     ]
 
                     year_index = constructor_df["Ano"].astype(int)
@@ -2523,28 +2627,29 @@ with tab_eeff:
                     ).reset_index(drop=True)
 
                     vp_target = pd.to_numeric(calibration.get("vp_target"), errors="coerce")
-                    vp_pct_ingresos = pd.to_numeric(
-                        summary_df.loc[summary_df["Escenario"] == "% ingresos", "VP_Pagos_Total"],
-                        errors="coerce",
-                    )
                     vp_pct_utilidades = pd.to_numeric(
                         summary_df.loc[summary_df["Escenario"] == "% utilidades", "VP_Pagos_Total"],
                         errors="coerce",
                     )
-                    vp_pct_ingresos = (
-                        float(vp_pct_ingresos.iloc[0]) if len(vp_pct_ingresos) else np.nan
+                    vp_mix = pd.to_numeric(
+                        summary_df.loc[
+                            summary_df["Escenario"] == "Mix fijo + % utilidades",
+                            "VP_Pagos_Total",
+                        ],
+                        errors="coerce",
                     )
                     vp_pct_utilidades = (
                         float(vp_pct_utilidades.iloc[0]) if len(vp_pct_utilidades) else np.nan
                     )
-                    gap_vp_ingresos = (
-                        vp_pct_ingresos - float(vp_target)
-                        if pd.notna(vp_target) and np.isfinite(vp_pct_ingresos)
-                        else np.nan
-                    )
+                    vp_mix = float(vp_mix.iloc[0]) if len(vp_mix) else np.nan
                     gap_vp_utilidades = (
                         vp_pct_utilidades - float(vp_target)
                         if pd.notna(vp_target) and np.isfinite(vp_pct_utilidades)
+                        else np.nan
+                    )
+                    gap_vp_mix = (
+                        vp_mix - float(vp_target)
+                        if pd.notna(vp_target) and np.isfinite(vp_mix)
                         else np.nan
                     )
 
@@ -2554,32 +2659,22 @@ with tab_eeff:
                         f"${float(vp_target):,.0f}" if pd.notna(vp_target) else "NA",
                     )
                     d2.metric(
-                        "% ingresos calibrado",
-                        f"{float(auto_pct_revenue):.4f}%" if pd.notna(auto_pct_revenue) else "NA",
-                    )
-                    d3.metric(
                         "% utilidades calibrado",
                         f"{float(auto_pct_utility):.4f}%" if pd.notna(auto_pct_utility) else "NA",
                     )
-                    d4.metric(
-                        "Brecha VP % ingresos vs objetivo",
-                        f"${gap_vp_ingresos:,.0f}" if np.isfinite(gap_vp_ingresos) else "NA",
+                    d3.metric(
+                        "% utilidades mix calibrado",
+                        f"{float(auto_pct_mix_utility):.4f}%" if pd.notna(auto_pct_mix_utility) else "NA",
                     )
-                    d5.metric(
+                    d4.metric(
                         "Brecha VP % utilidades vs objetivo",
                         f"${gap_vp_utilidades:,.0f}" if np.isfinite(gap_vp_utilidades) else "NA",
                     )
+                    d5.metric(
+                        "Brecha VP mix vs objetivo",
+                        f"${gap_vp_mix:,.0f}" if np.isfinite(gap_vp_mix) else "NA",
+                    )
 
-                    if pd.notna(auto_pct_revenue) and not np.isclose(
-                        float(pct_revenue_input),
-                        float(auto_pct_revenue),
-                        rtol=0.0,
-                        atol=1e-9,
-                    ):
-                        st.info(
-                            "El % ingresos aplicado difiere del calibrado automatico. "
-                            "Revisa la brecha de VP mostrada arriba."
-                        )
                     if pd.notna(auto_pct_utility) and not np.isclose(
                         float(pct_utility_input),
                         float(auto_pct_utility),
@@ -2588,6 +2683,16 @@ with tab_eeff:
                     ):
                         st.info(
                             "El % utilidades aplicado difiere del calibrado automatico. "
+                            "Revisa la brecha de VP mostrada arriba."
+                        )
+                    if pd.notna(auto_pct_mix_utility) and not np.isclose(
+                        float(mix_pct_utility_input),
+                        float(auto_pct_mix_utility),
+                        rtol=0.0,
+                        atol=1e-9,
+                    ):
+                        st.info(
+                            "El % utilidades del escenario mix difiere del calibrado automatico. "
                             "Revisa la brecha de VP mostrada arriba."
                         )
 
@@ -2610,113 +2715,6 @@ with tab_eeff:
                         ),
                         width='stretch',
                     )
-with tab_prev:
-    section_header("Prevalencia por rango de edad", "Fuente: Prevalencia")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se usa la misma tabla de prevalencia del calculo central de poblacion objetivo.",
-            "Los porcentajes se convierten a proporcion (0-1) si vienen en %.",
-            "Se grafica prevalencia por grupo etario.",
-        ],
-    )
-    prev_df = target_snapshot.get("metadata", {}).get("prevalencia_df", pd.DataFrame())
-    if not isinstance(prev_df, pd.DataFrame) or prev_df.empty:
-        st.warning("No se pudo leer la tabla de prevalencia.")
-        st.caption(f"Detalle: {prev_source}")
-    else:
-        fig = px.bar(
-            prev_df,
-            x="GrupoEdad",
-            y="Prevalencia",
-            text="Prevalencia",
-            title="Prevalencia de enfermedades cardiovasculares por edad",
-        )
-        fig.update_traces(texttemplate="%{text:.1%}", textposition="outside")
-        fig.update_layout(title_x=0.5, title_xanchor="center")
-        fig = style_chart(fig)
-        chart_container(fig)
-        st.dataframe(prev_df, width='stretch')
-
-with tab_comp:
-    section_header("Comparacion Santander vs Valle", "Fuente centralizada")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se reutiliza el calculo central de Contexto y Demanda.",
-            "Fallback tecnico: si no existe snapshot en sesion, se autogenera aqui.",
-            "Objetivo Valle y tablas de edad se alimentan de la misma fuente unica.",
-        ],
-    )
-
-    summary = target_snapshot.get("summary_metrics", {})
-    eps_view = target_snapshot.get("eps_view", pd.DataFrame())
-    edad_view = target_snapshot.get("edad_view", pd.DataFrame())
-    formula_df = target_snapshot.get("formula_view", pd.DataFrame())
-    edad_chart_df = target_snapshot.get("edad_chart_df", pd.DataFrame())
-    warnings = target_snapshot.get("warnings", [])
-    target_sources = target_snapshot.get("metadata", {}).get("sources", {})
-
-    for msg in warnings:
-        st.warning(msg)
-
-    pct_atendido = pd.to_numeric(summary.get("pct_atendido_santander"), errors="coerce")
-    atendidos_total = pd.to_numeric(summary.get("atendidos_santander"), errors="coerce")
-    posibles_valle = pd.to_numeric(summary.get("posibles_atendidos_valle"), errors="coerce")
-    valle_total = pd.to_numeric(summary.get("afiliados_valle_total"), errors="coerce")
-
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("% atendido Santander", f"{pct_atendido:.2%}" if pd.notna(pct_atendido) else "NA")
-    col2.metric("Atendidos Santander", f"{atendidos_total:,.0f}" if pd.notna(atendidos_total) else "NA")
-    col3.metric("Posibles atendidos Valle", f"{posibles_valle:,.0f}" if pd.notna(posibles_valle) else "NA")
-    col4.metric("Afiliados Valle del Cauca", f"{valle_total:,.0f}" if pd.notna(valle_total) else "NA")
-
-    if isinstance(eps_view, pd.DataFrame) and not eps_view.empty:
-        st.dataframe(eps_view, width='stretch')
-        st.caption("Atendidos = ICB atendidos + Grupo Foscal atendidos.")
-    else:
-        st.warning("No hay tabla comparativa EPS disponible.")
-
-    divider()
-    section_header("Distribucion por edad", "Calculado con EPS_Edad + Prevalencia")
-    if isinstance(edad_view, pd.DataFrame) and not edad_view.empty:
-        st.dataframe(edad_view, width='stretch')
-    else:
-        st.warning("No hay distribucion por edad disponible.")
-
-    divider()
-    section_header("Formulas de calculo", "Guia de interpretacion")
-    if isinstance(formula_df, pd.DataFrame) and not formula_df.empty:
-        st.dataframe(formula_df, width='stretch')
-    else:
-        st.warning("No hay tabla de formulas disponible.")
-
-    if isinstance(edad_chart_df, pd.DataFrame) and not edad_chart_df.empty:
-        chart_df = edad_chart_df.copy()
-        chart_df["PacientesPorEdad"] = pd.to_numeric(chart_df["PacientesPorEdad"], errors="coerce")
-        chart_df = chart_df.dropna(subset=["PacientesPorEdad"])
-        if not chart_df.empty:
-            fig = px.bar(
-                chart_df,
-                x="GrupoEdad",
-                y="PacientesPorEdad",
-                title="Pacientes por edad (Valle del Cauca)",
-                labels={"GrupoEdad": "Grupo de edad", "PacientesPorEdad": "Pacientes"},
-            )
-            fig.update_layout(title_x=0.5, title_xanchor="center")
-            fig = style_chart(fig)
-            chart_container(fig)
-
-    st.caption(
-        " | ".join(
-            [
-                f"Comparacion: {target_sources.get('comparacion', comp_source)}",
-                f"EPS_Edad: {target_sources.get('eps_edad', edad_source)}",
-                f"Prevalencia: {target_sources.get('prevalencia', prev_source)}",
-            ]
-        )
-    )
-
 with tab_tar:
     section_header("Tarifas por escenario", "Fuente: Tarifas_Escenarios")
     explain_box(
@@ -2733,7 +2731,7 @@ with tab_tar:
         st.warning("No se pudo leer la hoja Tarifas_Escenarios.")
         st.caption(f"Detalle: {tarifas_esc_source}")
     else:
-        scenario = st.session_state.get("precio_scenario", PRICE_SCENARIOS[0])
+        scenario = st.session_state.get("precio_scenario", price_scenarios[0])
         st.caption(f"Escenario activo: {scenario}")
 
         scenario_df, _ = selector_escenario_tarifas(scenario, tarifas_esc_df)
@@ -2782,91 +2780,6 @@ with tab_tar:
                 ),
                 width='stretch',
             )
-
-with tab_sant:
-    section_header("Sede Santander (Estados de resultados)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se anualizan los estados mensuales de la hoja SANTANDER.",
-            "Se filtran cuentas no contables (% y ratios).",
-        ],
-    )
-    if sant_df.empty:
-        st.warning("No se pudo leer la hoja SANTANDER.")
-        st.caption(f"Detalle: {sant_source}")
-        st.stop()
-
-    account_col = sant_df.columns[0]
-    month_cols = [c for c in sant_df.columns[1:] if is_date_like(c)]
-    if not month_cols:
-        st.warning("No se detectaron columnas mensuales con fechas en SANTANDER.")
-        st.caption(f"Columnas: {[str(c) for c in sant_df.columns]}")
-        st.stop()
-
-    sant_work = filter_valid_accounts(sant_df, account_col)
-    long_df = sant_work[[account_col] + month_cols].melt(
-        id_vars=account_col, var_name="Month", value_name="Valor"
-    )
-    long_df["Valor"] = pd.to_numeric(long_df["Valor"], errors="coerce")
-    long_df["Year"] = pd.to_datetime(long_df["Month"], errors="coerce").dt.year
-    long_df = long_df.dropna(subset=["Year"])
-
-    annual_df = (
-        long_df.groupby([account_col, "Year"], dropna=False)["Valor"]
-        .sum(min_count=1)
-        .reset_index()
-        .rename(columns={account_col: "Cuenta"})
-    )
-
-    if annual_df.empty:
-        st.warning("No se pudo construir la tabla anual de Santander.")
-        st.stop()
-
-    annual_pivot = annual_df.pivot_table(
-        index="Cuenta", columns="Year", values="Valor", aggfunc="sum"
-    ).sort_index()
-
-    ingresos_series = pick_ingresos_series(annual_pivot)
-    if ingresos_series is None:
-        st.warning("No se encontro la cuenta 'Ingresos' en Santander.")
-        st.stop()
-
-    ingresos_series = ingresos_series.sort_index()
-
-    yoy = ingresos_series / ingresos_series.shift(1) - 1
-    growth_avg = weighted_growth(yoy)
-
-    section_header("Ingresos anuales y crecimiento YoY")
-    explain_box(
-        "Como se calcula",
-        [
-            "Ingresos anuales a partir de suma mensual.",
-            "YoY = crecimiento anual de ingresos.",
-        ],
-    )
-    ingresos_view = pd.DataFrame(
-        {"Ingresos": ingresos_series, "YoY": yoy}
-    ).reset_index().rename(columns={"Year": "AÃ±o"})
-    st.dataframe(
-        ingresos_view.style.format({"Ingresos": fmt_currency, "YoY": fmt_percent}),
-        width='stretch',
-    )
-    st.caption("Cifras en millones. YoY = crecimiento anual de ingresos.")
-
-    section_header("Proporciones vs ingresos (historico)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Cada cuenta dividida por ingresos del aÃ±o.",
-            "Se calcula promedio histÃ³rico como referencia.",
-        ],
-    )
-    ratio_df = annual_pivot.div(ingresos_series, axis=1).replace([np.inf, -np.inf], np.nan)
-    ratio_df["Promedio"] = ratio_df.mean(axis=1, skipna=True)
-    st.dataframe(ratio_df.reset_index(), width='stretch')
-
-    st.caption("La estructura de proyeccion anual se muestra en el tab EEFF.")
 
 with tab_share:
     section_header("Market share proyectado", "IPS + proyecto (2026-2030)")

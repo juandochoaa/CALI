@@ -6,19 +6,19 @@ from pathlib import Path
 from typing import List
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from dashboards.data_loader import load_cifras_eps
 from dashboards.ui import (
     apply_theme,
     bullet_card,
+    chart_container,
     explain_box,
     insight_cards,
     page_header,
     section_header,
-    subsection_selector,
-    takeaway_box,
-    text_card,
+    style_chart,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -50,152 +50,251 @@ def find_col(columns: List[str], includes: List[str]) -> str | None:
     return None
 
 
-def is_pct_col(col: str) -> bool:
-    norm = normalize_text(col)
-    return "%" in col or "porcentaje" in norm or "pct" in norm
+def parse_numeric_col(series: pd.Series) -> pd.Series:
+    cleaned = series.astype(str).str.strip()
+    cleaned = cleaned.str.replace(r"[^0-9,.\-]", "", regex=True)
+
+    has_comma = cleaned.str.contains(",", regex=False, na=False)
+    has_dot = cleaned.str.contains(r"\.", regex=True, na=False)
+    both = has_comma & has_dot
+    cleaned.loc[both] = (
+        cleaned.loc[both]
+        .str.replace(".", "", regex=False)
+        .str.replace(",", ".", regex=False)
+    )
+    comma_only = has_comma & ~has_dot
+    cleaned.loc[comma_only] = cleaned.loc[comma_only].str.replace(",", ".", regex=False)
+    return pd.to_numeric(cleaned, errors="coerce")
 
 
-def add_total_and_avg_row(df: pd.DataFrame, label_col: str) -> pd.DataFrame:
-    if df.empty:
-        return df
-    numeric_cols = []
-    avg_cols = []
-    for col in df.columns:
-        if col == label_col:
-            continue
-        series = pd.to_numeric(df[col], errors="coerce")
-        if series.notna().any():
-            numeric_cols.append(col)
-            if is_pct_col(col):
-                avg_cols.append(col)
-    if not numeric_cols:
-        return df
-    total_row = {label_col: "TOTAL"}
-    for col in numeric_cols:
-        series = pd.to_numeric(df[col], errors="coerce")
-        if col in avg_cols:
-            total_row[col] = series.mean()
-        else:
-            total_row[col] = series.sum(min_count=1)
-    return pd.concat([df, pd.DataFrame([total_row])], ignore_index=True)
+def resolve_raw_image(filename: str) -> Path | None:
+    path = ROOT_DIR / "data" / "raw" / filename
+    if path.exists():
+        return path
+    return None
 
 
-th_df, th_source = load_cifras_eps("TH")
+especialistas_df, especialistas_source = load_cifras_eps("Especialistas")
 
-view = subsection_selector(
-    ["Resumen", "Base de talento", "Notas"],
-    key="talento_view",
-    label="Vista",
+section_header("Panorama de talento", "Lectura ejecutiva")
+explain_box(
+    "Como se calcula",
+    [
+        "Resumen narrativo de disponibilidad y formacion.",
+        "No modifica calculos ni transformaciones.",
+    ],
+)
+insight_cards(
+    [
+        (
+            "Oferta local",
+            "La region tiene base academica y clinica para perfiles cardio-cerebro-vasculares.",
+        ),
+        (
+            "Riesgo de cobertura",
+            "Los perfiles de alta especializacion deben planearse con anticipacion por curva de formacion.",
+        ),
+        (
+            "Accion recomendada",
+            "Consolidar convenios universidad-hospital para asegurar embudo de talento en fases de crecimiento.",
+        ),
+    ],
+    columns=3,
+)
+bullet_card(
+    "Frentes de gestion",
+    [
+        "Mapear especialidades y subespecialidades criticas.",
+        "Definir estrategia de atraccion y retencion por perfil.",
+        "Alinear formacion clinica con capacidad instalada proyectada.",
+    ],
 )
 
-if view == "Resumen":
-    section_header("Panorama de talento", "Lectura ejecutiva")
-    explain_box(
-        "Como se calcula",
-        [
-            "Resumen narrativo de disponibilidad y formacion.",
-            "No modifica calculos ni transformaciones.",
-        ],
-    )
-    insight_cards(
-        [
-            (
-                "Oferta local",
-                "La region tiene base academica y clinica para perfiles cardio-cerebro-vasculares.",
+section_header("Formacion academica", "Universidades que ofrecen cardiologia, intervencionismo y neurointervencionismo")
+explain_box(
+    "Como se calcula",
+    [
+        "Fuente estructurada a partir de la informacion consolidada del equipo (sin dependencia de hoja TH).",
+        "Se separa en dos niveles: universidad/base clinica y oferta de programas por universidad.",
+    ],
+)
+
+universidades_df = pd.DataFrame(
+    [
+        {
+            "Universidad": "Universidad del Valle (Univalle)",
+            "Base / Convenio clinico": (
+                "Principal formador clinico en la region. Base en HUV Evaristo Garcia, "
+                "con rotaciones en Imbanaco, Valle del Lili y otras IPS."
             ),
-            (
-                "Riesgo de cobertura",
-                "Los perfiles de alta especializacion deben planearse con anticipacion por curva de formacion.",
-            ),
-            (
-                "Accion recomendada",
-                "Consolidar convenios universidad-hospital para asegurar embudo de talento en fases de crecimiento.",
-            ),
-        ],
-        columns=3,
-    )
-    bullet_card(
-        "Frentes de gestion",
-        [
-            "Mapear especialidades y subespecialidades criticas.",
-            "Definir estrategia de atraccion y retencion por perfil.",
-            "Alinear formacion clinica con capacidad instalada proyectada.",
-        ],
-    )
+        },
+        {
+            "Universidad": "Universidad ICESI",
+            "Base / Convenio clinico": "Convenio exclusivo de formacion con Fundacion Valle del Lili.",
+        },
+        {
+            "Universidad": "Universidad Santiago de Cali",
+            "Base / Convenio clinico": "Convenios docencia-servicio con varias IPS (Imbanaco, entre otras).",
+        },
+        {
+            "Universidad": "Pontificia Universidad Javeriana Cali",
+            "Base / Convenio clinico": "Convenios docencia-servicio con varias IPS (Valle del Lili, entre otras).",
+        },
+        {
+            "Universidad": "Universidad Libre Cali",
+            "Base / Convenio clinico": "Convenios docencia-servicio con varias IPS (HUV, Imbanaco, etc.).",
+        },
+    ]
+)
+st.dataframe(universidades_df, width='stretch', hide_index=True)
 
-elif view == "Base de talento":
-    section_header("Base de talento humano", "Fuente: hoja TH")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se carga la hoja TH del Excel Cali ANALISIS.",
-            "Se eliminan filas y columnas vacias.",
-            "Se agrega fila TOTAL (sumas) y PROMEDIO en columnas tipo porcentaje.",
-        ],
-    )
+programas_df = pd.DataFrame(
+    [
+        ("Universidad del Valle (Univalle)", "Pregrado en Medicina", "Internado"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Cardiologia", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Cirugia Vascular Periferica", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Neurocirugia", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Cirugia Pediatrica", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Anestesiologia", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Medicina Interna", "Residencia"),
+        ("Universidad del Valle (Univalle)", "Especializacion en Medicina Critica y Cuidado Intensivo", "Residencia"),
+        ("Universidad ICESI", "Pregrado en Medicina", "Internado"),
+        ("Universidad ICESI", "Especializacion en Cardiologia", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Cardiologia Pediatrica", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Cirugia de Cabeza y Cuello", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Neurocirugia", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Radiologia Intervencionista", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Anestesiologia", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Medicina Interna", "Residencia"),
+        ("Universidad ICESI", "Especializacion en Medicina Critica y Cuidado Intensivo", "Residencia"),
+        ("Universidad Santiago de Cali", "Pregrado en Medicina", "Internado"),
+        ("Universidad Santiago de Cali", "Especializacion en Medicina Interna", "Residencia"),
+        ("Pontificia Universidad Javeriana Cali", "Pregrado en Medicina", "Internado"),
+        ("Pontificia Universidad Javeriana Cali", "Especializacion en Cirugia Pediatrica", "Residencia"),
+        ("Pontificia Universidad Javeriana Cali", "Especializacion en Anestesiologia", "Residencia"),
+        ("Universidad Libre Cali", "Pregrado en Medicina", "Internado"),
+        ("Universidad Libre Cali", "Especializacion en Medicina Interna", "Residencia"),
+        ("Universidad Libre Cali", "Especializacion en Pediatria", "Residencia"),
+    ],
+    columns=["Universidad", "Programa", "Tipo"],
+)
+st.dataframe(programas_df, width='stretch', hide_index=True)
 
-    if th_df.empty:
-        st.warning("No se pudo leer la hoja TH.")
-        st.caption(f"Detalle: {th_source}")
-        st.stop()
+section_header("Residencia y subespecializacion", "Fundacion Valle del Lili - ICESI")
+subespecializaciones_df = pd.DataFrame(
+    [
+        ("Fundacion Valle del Lili - ICESI", "Entrenamiento Avanzado en Ecocardiografia"),
+        ("Fundacion Valle del Lili - ICESI", "Cardiologia intervencionista"),
+        ("Fundacion Valle del Lili - ICESI", "Electrofisiologia"),
+        ("Fundacion Valle del Lili - ICESI", "Hemodinamia estructural"),
+        ("Fundacion Valle del Lili - ICESI", "Endovascular periferico"),
+        ("Fundacion Valle del Lili - ICESI", "Neurointervencionismo"),
+    ],
+    columns=["Centro", "Programa avanzado"],
+)
+st.dataframe(subespecializaciones_df, width='stretch', hide_index=True)
 
-    work = th_df.copy()
-    work = work.dropna(axis=0, how="all").dropna(axis=1, how="all")
-    cols = [str(c) for c in work.columns]
-    label_col = (
-        find_col(cols, ["categoria"])
-        or find_col(cols, ["cargo"])
-        or find_col(cols, ["perfil"])
-        or find_col(cols, ["programa"])
-        or cols[0]
-    )
-    work[label_col] = work[label_col].astype(str).str.strip()
-
-    view_df = add_total_and_avg_row(work, label_col)
-
-    numeric_cols = []
-    fmt = {}
-    for col in view_df.columns:
-        if col == label_col:
-            continue
-        series = pd.to_numeric(view_df[col], errors="coerce")
-        if series.notna().any():
-            numeric_cols.append(col)
-            if is_pct_col(col):
-                fmt[col] = lambda v: "" if pd.isna(v) else (f"{v:.2%}" if abs(v) <= 1.5 else f"{v:,.2f}%")
-            else:
-                fmt[col] = lambda v: "" if pd.isna(v) else f"{v:,.0f}"
-
-    st.caption(f"Fuente: {th_source}")
-    if numeric_cols:
-        st.dataframe(view_df.style.format(fmt), width='stretch')
-    else:
-        st.dataframe(view_df, width='stretch')
-
+section_header(
+    "Número de Especialistas que cotizaron al SGSS a Mayo 2024",
+    "Comparativo Santander vs Valle del Cauca",
+)
+if especialistas_df.empty:
+    st.warning("No se pudo leer la hoja Especialistas.")
+    st.caption(f"Detalle: {especialistas_source}")
 else:
-    section_header("Notas de interpretacion", "Como leer la tabla")
-    explain_box(
-        "Como se calcula",
-        [
-            "TOTAL suma columnas con datos aditivos (personas, cupos, vacantes).",
-            "PROMEDIO se usa solo para columnas tipo porcentaje.",
-            "Si una columna representa porcentajes en 0-100, se mantiene el valor.",
-        ],
-    )
-    text_card(
-        "Lectura sugerida",
-        "Valida la escala de cada columna antes de interpretar porcentajes o comparativos entre perfiles.",
-    )
-    bullet_card(
-        "Buenas practicas",
-        [
-            "Separar indicadores de volumen y de eficiencia en visualizaciones diferentes.",
-            "Mantener definiciones consistentes para porcentaje, tasa y conteo.",
-            "Documentar supuestos de disponibilidad por especialidad.",
-        ],
-    )
-    takeaway_box(
-        "Siguiente paso",
-        "Cuando agregues nuevas subtablas de talento, usa este mismo formato: resumen, evidencia y notas.",
-    )
+    esp_view = especialistas_df.copy()
+    esp_view = esp_view.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    st.caption(f"Fuente: {especialistas_source}")
+    st.dataframe(esp_view, width='stretch', hide_index=True)
+
+    if not esp_view.empty:
+        cols = [str(c) for c in esp_view.columns]
+        specialist_col = (
+            find_col(cols, ["especialista"])
+            or find_col(cols, ["especialidad"])
+            or find_col(cols, ["perfil"])
+            or cols[0]
+        )
+        valle_col = find_col(cols, ["valle"])
+        santander_col = find_col(cols, ["santander"])
+
+        if specialist_col is None or valle_col is None or santander_col is None:
+            st.warning(
+                "No se pudieron identificar columnas para especialista, Santander y Valle en la hoja Especialistas."
+            )
+        else:
+            chart_base = esp_view[[specialist_col, valle_col, santander_col]].copy()
+            chart_base = chart_base.dropna(subset=[specialist_col], how="all").copy()
+            chart_base[specialist_col] = chart_base[specialist_col].astype(str).str.strip()
+            chart_base[valle_col] = parse_numeric_col(chart_base[valle_col])
+            chart_base[santander_col] = parse_numeric_col(chart_base[santander_col])
+            chart_base = chart_base.dropna(subset=[valle_col, santander_col], how="all").copy()
+
+            if chart_base.empty:
+                st.info("No hay datos numericos suficientes para graficar especialistas.")
+            else:
+                sort_order = (
+                    chart_base[[valle_col, santander_col]]
+                    .max(axis=1, skipna=True)
+                    .sort_values(ascending=True)
+                    .index
+                )
+                chart_base = chart_base.loc[sort_order]
+                long_df = chart_base.melt(
+                    id_vars=[specialist_col],
+                    value_vars=[valle_col, santander_col],
+                    var_name="Departamento",
+                    value_name="Especialistas",
+                )
+                long_df["Departamento"] = long_df["Departamento"].replace(
+                    {
+                        valle_col: "Valle del Cauca",
+                        santander_col: "Santander",
+                    }
+                )
+                fig = px.bar(
+                    long_df,
+                    x="Especialistas",
+                    y=specialist_col,
+                    color="Departamento",
+                    barmode="group",
+                    orientation="h",
+                    title="Especialistas cotizantes al SGSS - Santander vs Valle del Cauca",
+                    labels={
+                        "Especialistas": "Numero de especialistas",
+                        specialist_col: "Especialidad",
+                    },
+                    color_discrete_map={
+                        "Valle del Cauca": "#1f77b4",
+                        "Santander": "#d62728",
+                    },
+                )
+                fig = style_chart(fig)
+                fig.update_layout(
+                    font={"color": "#000000"},
+                    title_font={"color": "#000000"},
+                    legend_title_font={"color": "#000000"},
+                    legend_font={"color": "#000000"},
+                )
+                fig.update_xaxes(title_font={"color": "#000000"}, tickfont={"color": "#000000"})
+                fig.update_yaxes(title_font={"color": "#000000"}, tickfont={"color": "#000000"})
+                chart_container(fig)
+
+section_header("Perfil ReTHUS - Numero Residentes", "Imagenes de referencia")
+santander_img = resolve_raw_image("BeneficiariosdelSNRMSantander.png")
+valle_img = resolve_raw_image("BeneficiariosdelSNRMValle.png")
+
+col_sant, col_valle = st.columns(2)
+with col_sant:
+    st.markdown("**Santander**")
+    if santander_img is None:
+        st.warning("No se encontro la imagen de Santander en data/raw.")
+    else:
+        st.image(str(santander_img), use_container_width=True)
+with col_valle:
+    st.markdown("**Valle del Cauca**")
+    if valle_img is None:
+        st.warning("No se encontro la imagen de Valle en data/raw.")
+    else:
+        st.image(str(valle_img), use_container_width=True)
 

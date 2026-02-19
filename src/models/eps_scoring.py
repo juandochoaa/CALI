@@ -14,6 +14,11 @@ def _normalize_text(text: str) -> str:
     return normalized
 
 
+def _compact_key(text: str) -> str:
+    normalized = _normalize_text(text)
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
 BLOCK_DEFS: List[Tuple[str, List[str], bool, bool]] = [
     ("REV", ["Ingresos netos por ventas", "Total Ingreso Operativo"], False, False),
     ("AC", ["Activos Corrientes"], False, False),
@@ -103,9 +108,10 @@ def build_blocks_long(
     frame = df[[entity_col, account_col] + list(year_cols)].copy()
     frame[account_col] = frame[account_col].astype(str)
     frame["account_norm"] = frame[account_col].map(_normalize_text)
+    frame["account_key"] = frame[account_col].map(_compact_key)
 
     long_df = frame.melt(
-        id_vars=[entity_col, "account_norm"],
+        id_vars=[entity_col, "account_norm", "account_key"],
         value_vars=list(year_cols),
         var_name="year",
         value_name="value",
@@ -119,18 +125,22 @@ def build_blocks_long(
     non_additive_blocks = {"REV", "NET_INCOME"}
     for block, accounts, _, abs_value in BLOCK_DEFS:
         accounts_norm = [_normalize_text(acc) for acc in accounts]
-        subset = long_df[long_df["account_norm"].isin(accounts_norm)]
+        accounts_key = [_compact_key(acc) for acc in accounts]
+        subset = long_df[
+            long_df["account_norm"].isin(accounts_norm)
+            | long_df["account_key"].isin(accounts_key)
+        ]
         if subset.empty:
             blocks_df[block] = np.nan
             continue
         if block in non_additive_blocks:
-            order_map = {acc: idx for idx, acc in enumerate(accounts_norm)}
+            order_map = {acc: idx for idx, acc in enumerate(accounts_key)}
             grouped_accounts = (
-                subset.groupby([entity_col, "year", "account_norm"], dropna=False)["value"]
+                subset.groupby([entity_col, "year", "account_key"], dropna=False)["value"]
                 .sum(min_count=1)
                 .reset_index()
             )
-            grouped_accounts["account_order"] = grouped_accounts["account_norm"].map(order_map)
+            grouped_accounts["account_order"] = grouped_accounts["account_key"].map(order_map)
             grouped = (
                 grouped_accounts.sort_values("account_order")
                 .groupby([entity_col, "year"], dropna=False, as_index=False)

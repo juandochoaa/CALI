@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unicodedata
+from itertools import combinations
 from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 import numpy as np
@@ -169,6 +170,115 @@ def _build_capmin_map(eps_list: Sequence[str]) -> Dict[str, float]:
     if "EMSSANAR EPS" in capmin_map:
         capmin_map["EMSSANAR EPS"] = 17800.0
     return capmin_map
+
+
+def _truncate_wide_year_columns(df: pd.DataFrame, max_year: int) -> pd.DataFrame:
+    keep_cols: List[Any] = []
+    for col in df.columns:
+        col_str = str(col).strip()
+        if col_str.isdigit():
+            if int(col_str) <= int(max_year):
+                keep_cols.append(col)
+        else:
+            keep_cols.append(col)
+    return df[keep_cols].copy()
+
+
+def _compute_eps_actual_breaches(
+    eps_eeff_df: pd.DataFrame,
+    eps_obj: Sequence[str],
+    cash_thresholds: Sequence[int] = (15,),
+    paydays_range: tuple[float, float] = (20.0, 70.0),
+) -> pd.DataFrame:
+    eeff_wide = _build_eps_eeff_wide(eps_eeff_df=eps_eeff_df, eps_obj=eps_obj)
+    if eeff_wide.empty:
+        return pd.DataFrame(
+            columns=[
+                "EPS",
+                "AÃ±o",
+                "Obs_CM_ratio_lt_1",
+                "Obs_PA_ratio_lt_1",
+                "Obs_RI_ratio_lt_1",
+                "Obs_PayDays_out_20_70",
+            ]
+            + [f"Obs_CashDays_lt_{int(thr)}" for thr in cash_thresholds]
+        )
+
+    year_col = _resolve_year_column(eeff_wide)
+    work = eeff_wide.copy()
+    work["Ingresos"] = _numeric_series(work, ["TotalIngresoOperativo", "Ingresosnetosporventas"])
+    work["Costo"] = _numeric_series(work, ["Otroscostospornaturaleza"])
+    work["GAdmin"] = _numeric_series(work, ["Gastosadministrativos"])
+    work["Cash"] = _numeric_series(work, ["EfectivooEquivalentes"])
+    work["Equity"] = _numeric_series(work, ["Totaldepatrimonio"])
+    work["ReservasProxy"] = _numeric_series(work, ["Provisionesparaotrospasivosygastos"])
+    work["InvLiquidas"] = _numeric_series(work, ["Activosfinancierosdecortoplazo"], default=0.0).fillna(0.0)
+
+    opex_component_map = {
+        "Gastosporbeneficiosdelosempleado": [
+            "Gastosporbeneficiosdelosempleado",
+            "Gastosporbeneficiosdelosempleados",
+        ],
+        "Costosdetransporte": ["Costosdetransporte"],
+        "Impuestoycontribuciones": ["Impuestoycontribuciones"],
+        "Otrosgastos": ["Otrosgastos"],
+    }
+    for new_col, candidates in opex_component_map.items():
+        work[new_col] = _numeric_series(work, candidates, default=0.0).fillna(0.0)
+
+    work["OPEX_other"] = work[list(opex_component_map.keys())].sum(axis=1)
+    work["OpExCash"] = work["Costo"] + work["GAdmin"] + work["OPEX_other"]
+    work["CxP_Comercial"] = _commercial_payables_series(work)
+    work["LR"] = _safe_div(work["Costo"].to_numpy(dtype=float), work["Ingresos"].to_numpy(dtype=float))
+
+    low = float(paydays_range[0])
+    high = float(paydays_range[1])
+    if low > high:
+        low, high = high, low
+
+    capmin_map = _build_capmin_map(work["EPS"].dropna().astype(str).unique().tolist())
+    work["CapMinReq"] = work["EPS"].map(capmin_map).astype(float)
+
+    work["CM_ratio"] = _safe_div(
+        work["Equity"].to_numpy(dtype=float),
+        work["CapMinReq"].to_numpy(dtype=float),
+    )
+    pa_req = 0.08 * work["Ingresos"].to_numpy(dtype=float) * work["LR"].to_numpy(dtype=float)
+    work["PA_ratio"] = _safe_div(work["Equity"].to_numpy(dtype=float), pa_req)
+    work["RI_ratio"] = _safe_div(
+        (work["Cash"] + work["InvLiquidas"]).to_numpy(dtype=float),
+        work["ReservasProxy"].to_numpy(dtype=float),
+    )
+    work["CashDays"] = 365.0 * _safe_div(
+        work["Cash"].to_numpy(dtype=float),
+        work["OpExCash"].to_numpy(dtype=float),
+    )
+    work["PayDays"] = 365.0 * _safe_div(
+        work["CxP_Comercial"].to_numpy(dtype=float),
+        work["OpExCash"].to_numpy(dtype=float),
+    )
+
+    out = pd.DataFrame(
+        {
+            "EPS": work["EPS"].astype(str),
+            "AÃ±o": pd.to_numeric(work[year_col], errors="coerce").astype("Int64"),
+            "Obs_CM_ratio_lt_1": (work["CM_ratio"] < 1.0).fillna(False).astype(float),
+            "Obs_PA_ratio_lt_1": (work["PA_ratio"] < 1.0).fillna(False).astype(float),
+            "Obs_RI_ratio_lt_1": (work["RI_ratio"] < 1.0).fillna(False).astype(float),
+            f"Obs_PayDays_out_{int(low)}_{int(high)}": (
+                ((work["PayDays"] < low) | (work["PayDays"] > high))
+                .fillna(False)
+                .astype(float)
+            ),
+        }
+    )
+    for thr in cash_thresholds:
+        out[f"Obs_CashDays_lt_{int(thr)}"] = (work["CashDays"] < float(thr)).fillna(False).astype(float)
+
+    out = out.dropna(subset=["AÃ±o"]).copy()
+    out["AÃ±o"] = out["AÃ±o"].astype(int)
+    out = out.sort_values(["EPS", "AÃ±o"]).reset_index(drop=True)
+    return out
 
 
 def _build_eps_eeff_wide(
@@ -827,6 +937,488 @@ def run_eps_montecarlo(
         "prep": prep_diag,
     }
     return results_df, diagnostics
+
+
+def run_eps_montecarlo_backtesting(
+    upc_df: pd.DataFrame,
+    eps_eeff_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    eps_afiliados_hist_df: pd.DataFrame,
+    eps_obj: Sequence[str] | None = None,
+    n_sim: int = 3_000,
+    cash_thresholds: Sequence[int] = (15,),
+    paydays_range: tuple[float, float] = (20.0, 70.0),
+    upc_optimism_factor: float = 1.2,
+    upc_growth_start_year: int = 2019,
+    upc_growth_end_year: int = 2026,
+    start_anchor_year: int = 2021,
+    random_seed: int = 42,
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
+    eps_obj = list(eps_obj or EPS_OBJ_DEFAULT)
+    eeff_wide_full = _build_eps_eeff_wide(eps_eeff_df=eps_eeff_df, eps_obj=eps_obj)
+    if eeff_wide_full.empty:
+        empty_detail = pd.DataFrame(
+            columns=[
+                "EPS",
+                "AnchorYear",
+                "TargetYear",
+                "Metric",
+                "PredictedProb",
+                "ObservedBreach",
+                "AbsError",
+                "Brier",
+            ]
+        )
+        empty_summary = pd.DataFrame(
+            columns=[
+                "Metric",
+                "N",
+                "PredictedMean",
+                "ObservedRate",
+                "MAE",
+                "Brier",
+            ]
+        )
+        return empty_detail, empty_summary, {
+            "anchors_used": [],
+            "reason": "sin_eeff_para_backtesting",
+        }
+
+    year_col = _resolve_year_column(eeff_wide_full)
+    years = sorted(pd.to_numeric(eeff_wide_full[year_col], errors="coerce").dropna().astype(int).unique().tolist())
+    if len(years) < 3:
+        empty_detail = pd.DataFrame(
+            columns=[
+                "EPS",
+                "AnchorYear",
+                "TargetYear",
+                "Metric",
+                "PredictedProb",
+                "ObservedBreach",
+                "AbsError",
+                "Brier",
+            ]
+        )
+        empty_summary = pd.DataFrame(
+            columns=[
+                "Metric",
+                "N",
+                "PredictedMean",
+                "ObservedRate",
+                "MAE",
+                "Brier",
+            ]
+        )
+        return empty_detail, empty_summary, {
+            "anchors_used": [],
+            "reason": "historia_insuficiente",
+            "years_detected": years,
+        }
+
+    anchor_min = max(int(start_anchor_year), years[0] + 1)
+    anchor_max = years[-2]
+    anchors = [y for y in years if anchor_min <= y <= anchor_max]
+    if not anchors:
+        empty_detail = pd.DataFrame(
+            columns=[
+                "EPS",
+                "AnchorYear",
+                "TargetYear",
+                "Metric",
+                "PredictedProb",
+                "ObservedBreach",
+                "AbsError",
+                "Brier",
+            ]
+        )
+        empty_summary = pd.DataFrame(
+            columns=[
+                "Metric",
+                "N",
+                "PredictedMean",
+                "ObservedRate",
+                "MAE",
+                "Brier",
+            ]
+        )
+        return empty_detail, empty_summary, {
+            "anchors_used": [],
+            "reason": "sin_ventanas_backtest",
+            "anchor_min": anchor_min,
+            "anchor_max": anchor_max,
+        }
+
+    actual_breaches = _compute_eps_actual_breaches(
+        eps_eeff_df=eps_eeff_df,
+        eps_obj=eps_obj,
+        cash_thresholds=cash_thresholds,
+        paydays_range=paydays_range,
+    )
+
+    low, high = paydays_range
+    if low > high:
+        low, high = high, low
+    metric_map = {
+        "P_avg_CM_ratio_lt_1": "Obs_CM_ratio_lt_1",
+        "P_avg_PA_ratio_lt_1": "Obs_PA_ratio_lt_1",
+        "P_avg_RI_ratio_lt_1": "Obs_RI_ratio_lt_1",
+        f"P_avg_PayDays_out_{int(low)}_{int(high)}": f"Obs_PayDays_out_{int(low)}_{int(high)}",
+    }
+    for thr in cash_thresholds:
+        metric_map[f"P_avg_CashDays_lt_{int(thr)}"] = f"Obs_CashDays_lt_{int(thr)}"
+
+    detail_rows: List[Dict[str, Any]] = []
+
+    for anchor_year in anchors:
+        target_year = int(anchor_year) + 1
+        eeff_cut = _truncate_wide_year_columns(eps_eeff_df, max_year=anchor_year)
+        afiliados_cut = _truncate_wide_year_columns(eps_afiliados_hist_df, max_year=anchor_year)
+        upc_cut = _truncate_wide_year_columns(upc_df, max_year=anchor_year)
+
+        sim_results, _ = run_eps_montecarlo(
+            upc_df=upc_cut,
+            eps_eeff_df=eeff_cut,
+            eps_edad_df=eps_edad_df,
+            eps_afiliados_hist_df=afiliados_cut,
+            eps_obj=eps_obj,
+            n_sim=int(n_sim),
+            horizon_end=target_year,
+            cash_thresholds=tuple(int(x) for x in cash_thresholds),
+            paydays_range=(float(low), float(high)),
+            upc_optimism_factor=float(upc_optimism_factor),
+            upc_growth_start_year=int(upc_growth_start_year),
+            upc_growth_end_year=int(upc_growth_end_year),
+            scenarios={"BASE": {"LR_shift": 0.0, "g_shift": 0.0}},
+            random_seed=int(random_seed) + int(anchor_year),
+        )
+        sim_results = sim_results[sim_results["Escenario"] == "BASE"].copy()
+        if sim_results.empty:
+            continue
+
+        actual_target = actual_breaches[actual_breaches["AÃ±o"] == target_year].copy()
+        if actual_target.empty:
+            continue
+
+        merged = sim_results.merge(
+            actual_target,
+            on="EPS",
+            how="inner",
+        )
+        if merged.empty:
+            continue
+
+        for prob_col, obs_col in metric_map.items():
+            if prob_col not in merged.columns or obs_col not in merged.columns:
+                continue
+            pred = pd.to_numeric(merged[prob_col], errors="coerce")
+            obs = pd.to_numeric(merged[obs_col], errors="coerce")
+            valid = pred.notna() & obs.notna()
+            if not valid.any():
+                continue
+            valid_idx = merged.index[valid]
+            for idx in valid_idx:
+                eps_name = str(merged.at[idx, "EPS"])
+                pred_val = float(pred.at[idx])
+                obs_val = float(obs.at[idx])
+                abs_err = abs(pred_val - obs_val)
+                brier = (pred_val - obs_val) ** 2
+                detail_rows.append(
+                    {
+                        "EPS": eps_name,
+                        "AnchorYear": int(anchor_year),
+                        "TargetYear": int(target_year),
+                        "Metric": prob_col,
+                        "PredictedProb": pred_val,
+                        "ObservedBreach": obs_val,
+                        "AbsError": abs_err,
+                        "Brier": brier,
+                    }
+                )
+
+    detail_df = pd.DataFrame(detail_rows)
+    if detail_df.empty:
+        summary_df = pd.DataFrame(
+            columns=[
+                "Metric",
+                "N",
+                "PredictedMean",
+                "ObservedRate",
+                "MAE",
+                "Brier",
+            ]
+        )
+    else:
+        summary_df = (
+            detail_df.groupby("Metric", as_index=False)
+            .agg(
+                N=("EPS", "count"),
+                PredictedMean=("PredictedProb", "mean"),
+                ObservedRate=("ObservedBreach", "mean"),
+                MAE=("AbsError", "mean"),
+                Brier=("Brier", "mean"),
+            )
+            .sort_values("Metric")
+            .reset_index(drop=True)
+        )
+
+    diagnostics = {
+        "anchors_used": anchors,
+        "n_anchors": len(anchors),
+        "n_obs": int(len(detail_df)),
+        "metric_map": metric_map,
+        "start_anchor_year": int(start_anchor_year),
+    }
+    return detail_df, summary_df, diagnostics
+
+
+def run_eps_seed_stability(
+    upc_df: pd.DataFrame,
+    eps_eeff_df: pd.DataFrame,
+    eps_edad_df: pd.DataFrame,
+    eps_afiliados_hist_df: pd.DataFrame,
+    market_share_df: pd.DataFrame,
+    reclamos_score_df: pd.DataFrame | None = None,
+    cxp_score_df: pd.DataFrame | None = None,
+    eps_obj: Sequence[str] | None = None,
+    seeds: Sequence[int] = (7, 42, 77, 123, 2026),
+    n_sim: int = 3_000,
+    horizon_end: int = 2030,
+    cash_thresholds: Sequence[int] = (15,),
+    paydays_range: tuple[float, float] = (20.0, 70.0),
+    upc_optimism_factor: float = 1.2,
+    upc_growth_start_year: int = 2019,
+    upc_growth_end_year: int = 2026,
+    scenarios: Mapping[str, Mapping[str, float]] | None = None,
+    risk_weight: float = 0.55,
+    market_weight: float = 0.05,
+    complaints_weight: float = 0.2,
+    cxp_rev_weight: float = 0.2,
+) -> Dict[str, pd.DataFrame]:
+    eps_obj = list(eps_obj or EPS_OBJ_DEFAULT)
+    scenarios = scenarios or {
+        "BASE": {"LR_shift": 0.0, "g_shift": 0.0},
+        "STRESS_LR": {"LR_shift": 0.05, "g_shift": 0.0},
+        "STRESS_MIX": {"LR_shift": 0.05, "g_shift": -0.03},
+    }
+    probability_columns = [f"P_avg_CashDays_lt_{int(thr)}" for thr in cash_thresholds] + [
+        "P_avg_CM_ratio_lt_1",
+        "P_avg_PA_ratio_lt_1",
+        "P_avg_RI_ratio_lt_1",
+        f"P_avg_PayDays_out_{int(min(paydays_range))}_{int(max(paydays_range))}",
+    ]
+    probability_columns = [c for c in probability_columns if c in PROBABILITY_COLUMNS or c.startswith("P_avg_")]
+
+    per_seed_global: List[pd.DataFrame] = []
+    per_seed_escenario: List[pd.DataFrame] = []
+
+    for seed in seeds:
+        results_df, _ = run_eps_montecarlo(
+            upc_df=upc_df,
+            eps_eeff_df=eps_eeff_df,
+            eps_edad_df=eps_edad_df,
+            eps_afiliados_hist_df=eps_afiliados_hist_df,
+            eps_obj=eps_obj,
+            n_sim=int(n_sim),
+            horizon_end=int(horizon_end),
+            cash_thresholds=tuple(int(x) for x in cash_thresholds),
+            paydays_range=paydays_range,
+            upc_optimism_factor=float(upc_optimism_factor),
+            upc_growth_start_year=int(upc_growth_start_year),
+            upc_growth_end_year=int(upc_growth_end_year),
+            scenarios=scenarios,
+            random_seed=int(seed),
+        )
+        results_imputed = impute_missing_probabilities(
+            results_df=results_df,
+            eps_obj=eps_obj,
+            scenarios=list(scenarios.keys()),
+            probability_columns=PROBABILITY_COLUMNS,
+        )
+        results_scored = score_risk_percentiles(
+            df=results_imputed,
+            probability_columns=PROBABILITY_COLUMNS,
+        )
+        _, ranking_escenario, ranking_global = build_composite_ranking(
+            scored_df=results_scored,
+            market_share_df=market_share_df,
+            reclamos_score_df=reclamos_score_df,
+            cxp_score_df=cxp_score_df,
+            risk_weight=float(risk_weight),
+            market_weight=float(market_weight),
+            complaints_weight=float(complaints_weight),
+            cxp_rev_weight=float(cxp_rev_weight),
+        )
+
+        g = ranking_global[["EPS", "Score_Final", "Ranking_Global_Final"]].copy()
+        g["Seed"] = int(seed)
+        per_seed_global.append(g)
+
+        s = ranking_escenario[
+            ["Escenario", "EPS", "Score_Final", "Ranking_Escenario_Final"]
+        ].copy()
+        s["Seed"] = int(seed)
+        per_seed_escenario.append(s)
+
+    global_df = pd.concat(per_seed_global, ignore_index=True) if per_seed_global else pd.DataFrame()
+    escenario_df = pd.concat(per_seed_escenario, ignore_index=True) if per_seed_escenario else pd.DataFrame()
+
+    pair_rows_global: List[Dict[str, Any]] = []
+    pair_rows_esc: List[Dict[str, Any]] = []
+
+    seed_values = sorted(pd.to_numeric(pd.Series(list(seeds)), errors="coerce").dropna().astype(int).unique().tolist())
+    for seed_a, seed_b in combinations(seed_values, 2):
+        ga = global_df[global_df["Seed"] == seed_a][["EPS", "Score_Final", "Ranking_Global_Final"]].rename(
+            columns={
+                "Score_Final": "Score_A",
+                "Ranking_Global_Final": "Rank_A",
+            }
+        )
+        gb = global_df[global_df["Seed"] == seed_b][["EPS", "Score_Final", "Ranking_Global_Final"]].rename(
+            columns={
+                "Score_Final": "Score_B",
+                "Ranking_Global_Final": "Rank_B",
+            }
+        )
+        gm = ga.merge(gb, on="EPS", how="inner")
+        if gm.empty:
+            continue
+        pair_rows_global.append(
+            {
+                "Seed_A": int(seed_a),
+                "Seed_B": int(seed_b),
+                "N_EPS": int(len(gm)),
+                "Spearman_Score_Final": float(gm["Score_A"].corr(gm["Score_B"], method="spearman")),
+                "Spearman_Ranking_Global": float(gm["Rank_A"].corr(gm["Rank_B"], method="spearman")),
+            }
+        )
+
+        for scen in sorted(escenario_df["Escenario"].dropna().unique().tolist()):
+            sa = escenario_df[
+                (escenario_df["Seed"] == seed_a) & (escenario_df["Escenario"] == scen)
+            ][["EPS", "Score_Final", "Ranking_Escenario_Final"]].rename(
+                columns={
+                    "Score_Final": "Score_A",
+                    "Ranking_Escenario_Final": "Rank_A",
+                }
+            )
+            sb = escenario_df[
+                (escenario_df["Seed"] == seed_b) & (escenario_df["Escenario"] == scen)
+            ][["EPS", "Score_Final", "Ranking_Escenario_Final"]].rename(
+                columns={
+                    "Score_Final": "Score_B",
+                    "Ranking_Escenario_Final": "Rank_B",
+                }
+            )
+            sm = sa.merge(sb, on="EPS", how="inner")
+            if sm.empty:
+                continue
+            pair_rows_esc.append(
+                {
+                    "Escenario": scen,
+                    "Seed_A": int(seed_a),
+                    "Seed_B": int(seed_b),
+                    "N_EPS": int(len(sm)),
+                    "Spearman_Score_Final": float(sm["Score_A"].corr(sm["Score_B"], method="spearman")),
+                    "Spearman_Ranking_Escenario": float(sm["Rank_A"].corr(sm["Rank_B"], method="spearman")),
+                }
+            )
+
+    if pair_rows_global:
+        pairwise_global_df = (
+            pd.DataFrame(pair_rows_global)
+            .sort_values(["Seed_A", "Seed_B"])
+            .reset_index(drop=True)
+        )
+    else:
+        pairwise_global_df = pd.DataFrame(
+            columns=[
+                "Seed_A",
+                "Seed_B",
+                "N_EPS",
+                "Spearman_Score_Final",
+                "Spearman_Ranking_Global",
+            ]
+        )
+    if pair_rows_esc:
+        pairwise_esc_df = (
+            pd.DataFrame(pair_rows_esc)
+            .sort_values(["Escenario", "Seed_A", "Seed_B"])
+            .reset_index(drop=True)
+        )
+    else:
+        pairwise_esc_df = pd.DataFrame(
+            columns=[
+                "Escenario",
+                "Seed_A",
+                "Seed_B",
+                "N_EPS",
+                "Spearman_Score_Final",
+                "Spearman_Ranking_Escenario",
+            ]
+        )
+
+    if pairwise_global_df.empty:
+        global_summary_df = pd.DataFrame(
+            columns=[
+                "Metric",
+                "Mean",
+                "Min",
+                "Max",
+            ]
+        )
+    else:
+        global_summary_df = pd.DataFrame(
+            [
+                {
+                    "Metric": "Spearman_Score_Final",
+                    "Mean": float(pairwise_global_df["Spearman_Score_Final"].mean()),
+                    "Min": float(pairwise_global_df["Spearman_Score_Final"].min()),
+                    "Max": float(pairwise_global_df["Spearman_Score_Final"].max()),
+                },
+                {
+                    "Metric": "Spearman_Ranking_Global",
+                    "Mean": float(pairwise_global_df["Spearman_Ranking_Global"].mean()),
+                    "Min": float(pairwise_global_df["Spearman_Ranking_Global"].min()),
+                    "Max": float(pairwise_global_df["Spearman_Ranking_Global"].max()),
+                },
+            ]
+        )
+
+    if pairwise_esc_df.empty:
+        escenario_summary_df = pd.DataFrame(
+            columns=["Escenario", "Metric", "Mean", "Min", "Max"]
+        )
+    else:
+        rows: List[Dict[str, Any]] = []
+        for scen, gdf in pairwise_esc_df.groupby("Escenario", dropna=False):
+            rows.append(
+                {
+                    "Escenario": scen,
+                    "Metric": "Spearman_Score_Final",
+                    "Mean": float(gdf["Spearman_Score_Final"].mean()),
+                    "Min": float(gdf["Spearman_Score_Final"].min()),
+                    "Max": float(gdf["Spearman_Score_Final"].max()),
+                }
+            )
+            rows.append(
+                {
+                    "Escenario": scen,
+                    "Metric": "Spearman_Ranking_Escenario",
+                    "Mean": float(gdf["Spearman_Ranking_Escenario"].mean()),
+                    "Min": float(gdf["Spearman_Ranking_Escenario"].min()),
+                    "Max": float(gdf["Spearman_Ranking_Escenario"].max()),
+                }
+            )
+        escenario_summary_df = pd.DataFrame(rows).sort_values(["Escenario", "Metric"]).reset_index(drop=True)
+
+    return {
+        "per_seed_global": global_df,
+        "per_seed_escenario": escenario_df,
+        "pairwise_global": pairwise_global_df,
+        "pairwise_escenario": pairwise_esc_df,
+        "summary_global": global_summary_df,
+        "summary_escenario": escenario_summary_df,
+    }
 
 
 def compute_market_share_valle(

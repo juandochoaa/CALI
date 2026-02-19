@@ -38,7 +38,17 @@ page_header(
 
 
 def _compute_and_store_target_population_snapshot() -> dict:
-    comp_df, comp_source = load_cifras_eps("Comparacion")
+    comp_df = pd.DataFrame()
+    comp_source = "No disponible"
+    comp_sheet_used = "Comparacion"
+    for sheet in ["Comparacion_Desglose", "Comparacion Desglose", "ComparacionDesglose", "Comparacion"]:
+        cand_df, cand_source = load_cifras_eps(sheet)
+        if not cand_df.empty:
+            comp_df = cand_df
+            comp_source = cand_source
+            comp_sheet_used = sheet
+            break
+
     edad_df, edad_source = load_cifras_eps("EPS_Edad")
     prev_raw, prev_source = load_cifras_eps_raw("Prevalencia", header=None)
 
@@ -49,7 +59,8 @@ def _compute_and_store_target_population_snapshot() -> dict:
     )
     metadata = snapshot.setdefault("metadata", {})
     metadata["sources"] = {
-        "comparacion": comp_source,
+        "comparacion_desglose": comp_source if "desglose" in normalize_text(comp_sheet_used) else "NA",
+        "comparacion": comp_source if normalize_text(comp_sheet_used) == "comparacion" else "NA",
         "eps_edad": edad_source,
         "prevalencia": prev_source,
     }
@@ -89,32 +100,50 @@ def _render_target_population(
     formula_view = snapshot.get("formula_view", pd.DataFrame())
     edad_chart_df = snapshot.get("edad_chart_df", pd.DataFrame())
     warnings = snapshot.get("warnings", [])
-    sources = snapshot.get("metadata", {}).get("sources", {})
+    metadata = snapshot.get("metadata", {})
+    sources = metadata.get("sources", {})
+    method = str(metadata.get("method", "legacy"))
 
     for msg in warnings:
         st.warning(msg)
 
-    explain_box(
-        "Como se calcula",
-        [
-            "Se usa Comparacion para calcular % atendido Santander y objetivo de pacientes en Valle.",
-            "Se construye tabla EPS con afiliados y atendidos (ICB + Grupo Foscal).",
-            "La distribucion por edad se calcula con EPS_Edad + Prevalencia.",
-        ],
-    )
+    if method == "comparacion_desglose":
+        explain_box(
+            "Metodologia",
+            [
+                "Conceptualmente, primero se estima TAM por edad con afiliados y prevalencia.",
+                "Luego se aplica un factor de captura historico de Santander para obtener SOM.",
+                "Operativamente, la columna 'Pacientes por edad' ya viene ajustada por ese factor y se suma directamente.",
+            ],
+        )
+        st.markdown("### Formulacion")
+        st.latex(r"TAM_g = Afiliados_g \times Prev_g")
+        st.latex(r"TAM = \sum_g TAM_g")
+        st.latex(r"\alpha = \frac{Atendidos_{Santander}}{Afiliados_{Santander}}")
+        st.latex(r"SOM_g = TAM_g \times \alpha")
+        st.latex(r"Poblacion\ Objetivo = \sum_g PacientesPorEdad_g")
+    else:
+        explain_box(
+            "Como se calcula",
+            [
+                "Se usa Comparacion para calcular % atendido Santander y objetivo de pacientes en Valle.",
+                "Se construye tabla EPS con afiliados y atendidos (ICB + Grupo Foscal).",
+                "La distribucion por edad se calcula con EPS_Edad + Prevalencia.",
+            ],
+        )
 
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
-        "% atendido Santander",
-        _fmt_metric(summary.get("pct_atendido_santander"), percent=True),
+        "Poblacion objetivo",
+        _fmt_metric(summary.get("posibles_atendidos_valle")),
     )
     col2.metric(
         "Atendidos Santander",
         _fmt_metric(summary.get("atendidos_santander")),
     )
     col3.metric(
-        "Posibles atendidos Valle",
-        _fmt_metric(summary.get("posibles_atendidos_valle")),
+        "% atendido Santander",
+        _fmt_metric(summary.get("pct_atendido_santander"), percent=True),
     )
     col4.metric(
         "Afiliados Valle del Cauca",
@@ -125,11 +154,18 @@ def _render_target_population(
     if isinstance(eps_view, pd.DataFrame) and not eps_view.empty:
         st.dataframe(eps_view, width="stretch")
         st.caption("Atendidos = ICB atendidos + Grupo Foscal atendidos.")
-    else:
+    elif method != "comparacion_desglose":
         st.warning("No hay tabla comparativa EPS disponible.")
+    else:
+        st.info("En modo Comparacion_Desglose no se usa tabla comparativa EPS para el objetivo.")
 
     if show_age_block:
-        section_header("Distribucion por edad", "EPS_Edad + Prevalencia")
+        subtitle = (
+            "Fuente oficial: Comparacion_Desglose (Pacientes por edad)"
+            if method == "comparacion_desglose"
+            else "EPS_Edad + Prevalencia"
+        )
+        section_header("Distribucion por edad", subtitle)
         if isinstance(edad_view, pd.DataFrame) and not edad_view.empty:
             st.dataframe(edad_view, width="stretch")
         else:
@@ -153,11 +189,17 @@ def _render_target_population(
             st.warning("No hay tabla de formulas disponible.")
 
     if sources:
-        source_parts = [
-            f"Comparacion: {sources.get('comparacion', 'NA')}",
-            f"EPS_Edad: {sources.get('eps_edad', 'NA')}",
-            f"Prevalencia: {sources.get('prevalencia', 'NA')}",
-        ]
+        source_parts = []
+        if sources.get("comparacion_desglose", "NA") != "NA":
+            source_parts.append(f"Comparacion_Desglose: {sources.get('comparacion_desglose')}")
+        if sources.get("comparacion", "NA") != "NA":
+            source_parts.append(f"Comparacion: {sources.get('comparacion')}")
+        source_parts.extend(
+            [
+                f"EPS_Edad: {sources.get('eps_edad', 'NA')}",
+                f"Prevalencia: {sources.get('prevalencia', 'NA')}",
+            ]
+        )
         st.caption(" | ".join(source_parts))
 
 
