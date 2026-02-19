@@ -359,6 +359,36 @@ def detect_price_scenarios(tarifas_df: pd.DataFrame) -> List[str]:
     return ordered if ordered else fallback
 
 
+def get_price_scenario_description(label: str) -> str:
+    scenario_id = scenario_id_from_label(label)
+    descriptions = {
+        1: (
+            "Se construyó tomando como base las tarifas de Santander; sin embargo, dado que en ese "
+            "departamento no se encuentran habilitados todos los servicios incluidos en el análisis, "
+            "se incorporaron aquellos no prestados utilizando el volumen de pacientes de Bogotá como "
+            "referencia. Las tarifas de estos servicios que no se prestan en Santander fueron ajustadas "
+            "mediante un porcentaje de corrección calculado con base en la diferencia histórica entre "
+            "tarifas de ambas sedes. Adicionalmente, los servicios de laboratorio y banco de sangre se "
+            "modelaron íntegramente con cifras de Bogotá, tanto en tarifas como en pacientes e intervenciones."
+        ),
+        2: (
+            "Se estructuró utilizando las tarifas promedio de Bogotá como base del modelo, sin realizar "
+            "modificaciones en el volumen de pacientes ni en el número de intervenciones proyectadas, dado "
+            "que en esta sede se encuentran habilitados y se prestan la totalidad de los servicios incluidos "
+            "en el portafolio analizado."
+        ),
+        3: (
+            "Se construyó tomando como base las tarifas de Bogotá; sin embargo, estas fueron incrementadas "
+            "en un porcentaje derivado de la comparación entre las tarifas promedio ofertadas por las clínicas "
+            "del Valle del Cauca y las tarifas propias, con el fin de simular un posicionamiento competitivo "
+            "alineado al mercado regional. El volumen de pacientes y el número de intervenciones se mantuvieron "
+            "iguales a los proyectados para Bogotá."
+        ),
+        4: "Es el escenario 3 cambiando la distribución de los pacientes entre servicios.",
+    }
+    return descriptions.get(scenario_id, "Escenario sin descripción específica configurada.")
+
+
 def _normalize_tarifa_weights(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "PacientesValle" not in out.columns:
@@ -1745,6 +1775,17 @@ with tab_eeff:
         index=0,
         key="precio_scenario",
     )
+    st.markdown(
+        "\n".join(
+            [
+                "**Descripción de escenarios de precios**",
+                "1) *" + get_price_scenario_description("Escenario 1") + "*",
+                "2) *" + get_price_scenario_description("Escenario 2") + "*",
+                "3) *" + get_price_scenario_description("Escenario 3") + "*",
+                "4) *" + get_price_scenario_description("Escenario 4") + "*",
+            ]
+        )
+    )
 
     # Santander ratios + growth (para EEFF y proyecciones)
     ratio_df = None
@@ -2733,6 +2774,7 @@ with tab_tar:
     else:
         scenario = st.session_state.get("precio_scenario", price_scenarios[0])
         st.caption(f"Escenario activo: {scenario}")
+        st.markdown(f"**Definición del escenario activo:** {get_price_scenario_description(scenario)}")
 
         scenario_df, _ = selector_escenario_tarifas(scenario, tarifas_esc_df)
         if scenario_df.empty:
@@ -2937,13 +2979,6 @@ with tab_share:
     chart_container(fig)
 
     section_header("Tabla Market Share (IPS + proyecto)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Tabla IPS x Año con participación %.",
-            "Incluye fila TOTAL para validar ~100% por año.",
-        ],
-    )
     total_row = {"IPS": "TOTAL"}
     for year in proj_years_share:
         total_row[year] = share_df[year].sum(skipna=True)
