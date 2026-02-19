@@ -11,7 +11,7 @@ PAGE_PATH = (
     Path(__file__).resolve().parents[1]
     / "dashboards"
     / "pages"
-    / "3_Proyecciones_EEFF.py"
+    / "5_Proyecciones_EEFF.py"
 )
 
 

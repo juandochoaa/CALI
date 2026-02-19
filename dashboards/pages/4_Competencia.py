@@ -268,15 +268,20 @@ ratios_df = compute_ratios(blocks_df)
 ratio_cols = list(RATIO_SPECS.keys())
 wins_df = winsorize_ratios(ratios_df, ratio_cols, lower=0.02, upper=0.98)
 scored_df = score_ratios(wins_df, RATIO_SPECS, dpo_range=(20, 60), dpo_zero=(0, 120))
-weights = {
+weights_input = {
     "liquidity": w_liquidity / 100,
     "solvency": w_solvency / 100,
     "profitability": w_profitability / 100,
     "efficiency": w_efficiency / 100,
 }
-weight_sum = sum(weights.values())
+weight_sum = sum(weights_input.values())
+used_default_weights = False
 if weight_sum > 0:
-    weights = {k: v / weight_sum for k, v in weights.items()}
+    weights = {k: v / weight_sum for k, v in weights_input.items()}
+else:
+    default_sum = sum(DEFAULT_WEIGHTS.values())
+    weights = {k: v / default_sum for k, v in DEFAULT_WEIGHTS.items()}
+    used_default_weights = True
 scored_df = aggregate_scores(scored_df, RATIO_SPECS, weights)
 factor_cols = ["net_income_factor", "revenue_factor"]
 if not all(col in scored_df.columns for col in factor_cols):
@@ -1016,6 +1021,11 @@ with tab_analisis:
                 "Incluye fila PROMEDIO del mercado IPS.",
             ],
         )
+        if used_default_weights:
+            st.warning(
+                "La suma de pesos en sidebar es 0%. Se aplicaron pesos predeterminados "
+                "(Liquidez 30%, Endeudamiento 30%, Rentabilidad 20%, Eficiencia 20%)."
+            )
         score_last = scored_df[scored_df["year"] == last_year][
             ["entity", "score_financiero"]
         ].dropna()

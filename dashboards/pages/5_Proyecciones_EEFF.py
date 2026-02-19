@@ -990,6 +990,49 @@ def format_currency_df(df: pd.DataFrame, columns: list[str]) -> pd.io.formats.st
     return df.style.format({col: fmt for col in columns if col in df.columns})
 
 
+def summarize_dotacion_table(dotacion_df: pd.DataFrame) -> tuple[pd.DataFrame, str | None, float, float]:
+    if dotacion_df.empty:
+        return pd.DataFrame(), None, np.nan, np.nan
+
+    work = dotacion_df.copy()
+    work.columns = [str(c).strip() for c in work.columns]
+    cols = [str(c) for c in work.columns]
+
+    total_col = find_col(cols, ["total"])
+    if total_col is None:
+        numeric_candidates: list[str] = []
+        for col in cols:
+            numeric_vals = pd.to_numeric(work[col], errors="coerce")
+            if numeric_vals.notna().sum() > 0:
+                numeric_candidates.append(col)
+        total_col = numeric_candidates[-1] if numeric_candidates else None
+
+    if total_col is None:
+        return work, None, np.nan, np.nan
+
+    work[total_col] = pd.to_numeric(work[total_col], errors="coerce")
+
+    label_col = None
+    for col in cols:
+        if col == total_col:
+            continue
+        sample = work[col].dropna()
+        if not sample.empty:
+            label_col = col
+            break
+
+    if label_col is not None:
+        label_norm = work[label_col].astype(str).map(normalize_text)
+        calc_mask = ~label_norm.str.contains("total", na=False)
+    else:
+        calc_mask = pd.Series([True] * len(work), index=work.index)
+
+    total_sum = pd.to_numeric(work.loc[calc_mask, total_col], errors="coerce").sum(min_count=1)
+    total_10pct = total_sum * 0.10 if pd.notna(total_sum) else np.nan
+
+    return work, total_col, float(total_sum) if pd.notna(total_sum) else np.nan, float(total_10pct) if pd.notna(total_10pct) else np.nan
+
+
 def pick_ingresos_series(annual_pivot: pd.DataFrame) -> pd.Series | None:
     targets = [
         "ingresos netos por ventas",
@@ -1744,6 +1787,11 @@ if sant_df.empty:
     if not alt_sant_df.empty:
         sant_df, sant_source = alt_sant_df, alt_sant_source
 base_desglose_df, base_desglose_source = load_cifras_eps("BOGOTA_DESGLOSE")
+dotacion_df, dotacion_source = load_cifras_eps("DOTACION")
+if dotacion_df.empty:
+    alt_dotacion_df, alt_dotacion_source = load_cifras_eps("Dotacion")
+    if not alt_dotacion_df.empty:
+        dotacion_df, dotacion_source = alt_dotacion_df, alt_dotacion_source
 th_source = "Tabla salarial de referencia (sin hoja TH)"
 salary_comp = parse_salary_comparison_table(pd.DataFrame())
 
@@ -2325,6 +2373,7 @@ with tab_eeff:
                         "Como se calcula",
                         [
                             "Referencia de lote: minimo/promedio/maximo en COP por m2.",
+                            "Se incorpora DOTACION: 10% de la suma de la columna TOTAL.",
                             "Caso base obligatorio: escenario Promedio (arriendo fijo mensual).",
                             "Se comparan tres escenarios: monto fijo, % utilidades y mix fijo + % utilidades.",
                             "Se calibra automaticamente % utilidades para igualar VP del pago fijo base.",
@@ -2333,11 +2382,49 @@ with tab_eeff:
                     )
 
                     area_m2 = 4_619.2
-                    monthly_rent_base, fixed_payment = compute_fixed_rent_base(
+                    monthly_rent_base, fixed_payment_rent = compute_fixed_rent_base(
                         area_m2=area_m2,
                         rate_m2=43_349.0,
                     )
                     rent_ref_df = build_rent_reference_table(area_m2=area_m2)
+                    dotacion_view, dotacion_total_col, dotacion_total, dotacion_component = summarize_dotacion_table(
+                        dotacion_df
+                    )
+                    fixed_payment = (
+                        float(fixed_payment_rent) + float(dotacion_component)
+                        if pd.notna(dotacion_component)
+                        else float(fixed_payment_rent)
+                    )
+
+                    section_header("DOTACION", "Fuente: hoja DOTACION (Cali ANALISIS.xlsx)")
+                    if dotacion_view.empty or dotacion_total_col is None:
+                        st.warning("No se pudo leer la tabla DOTACION o no se encontro columna TOTAL.")
+                        st.caption(f"Detalle: {dotacion_source}")
+                    else:
+                        dotacion_numeric_cols = [
+                            c
+                            for c in dotacion_view.columns
+                            if pd.to_numeric(dotacion_view[c], errors="coerce").notna().sum() > 0
+                        ]
+                        st.dataframe(
+                            dotacion_view.style.format(
+                                {
+                                    col: (lambda v: "" if pd.isna(v) else f"${v:,.0f}")
+                                    for col in dotacion_numeric_cols
+                                }
+                            ),
+                            width="stretch",
+                            hide_index=True,
+                        )
+                        d_col1, d_col2 = st.columns(2)
+                        d_col1.metric(
+                            f"Suma columna {dotacion_total_col}",
+                            f"${dotacion_total:,.0f}" if pd.notna(dotacion_total) else "NA",
+                        )
+                        d_col2.metric(
+                            "10% de DOTACION (componente fijo)",
+                            f"${dotacion_component:,.0f}" if pd.notna(dotacion_component) else "NA",
+                        )
 
                     st.dataframe(
                         rent_ref_df.style.format(
@@ -2347,13 +2434,17 @@ with tab_eeff:
                         ),
                         width="stretch",
                     )
-                    c_base_1, c_base_2 = st.columns(2)
+                    c_base_1, c_base_2, c_base_3 = st.columns(3)
                     c_base_1.metric(
                         "Arriendo mensual base (Promedio)",
                         f"${monthly_rent_base:,.1f}",
                     )
                     c_base_2.metric(
                         "Arriendo anual base (modelo)",
+                        f"${fixed_payment_rent:,.1f}",
+                    )
+                    c_base_3.metric(
+                        "Monto fijo anual base total",
                         f"${fixed_payment:,.1f}",
                     )
 
@@ -2377,10 +2468,21 @@ with tab_eeff:
                         key="constructor_perpetuity_growth",
                     ) / 100.0
 
-                    if "constructor_fixed_payment_base" not in st.session_state:
+                    fixed_signature = (
+                        round(float(fixed_payment_rent), 2),
+                        round(float(dotacion_component) if pd.notna(dotacion_component) else 0.0, 2),
+                        round(float(fixed_payment), 2),
+                    )
+                    if "constructor_fixed_signature_v2" not in st.session_state:
                         st.session_state["constructor_fixed_payment_base"] = float(fixed_payment)
-                    if "constructor_mix_fixed_payment" not in st.session_state:
                         st.session_state["constructor_mix_fixed_payment"] = float(fixed_payment) * 0.5
+                        st.session_state["constructor_fixed_signature_v2"] = fixed_signature
+                    else:
+                        st.session_state["constructor_fixed_signature_v2"] = fixed_signature
+                        if "constructor_fixed_payment_base" not in st.session_state:
+                            st.session_state["constructor_fixed_payment_base"] = float(fixed_payment)
+                        if "constructor_mix_fixed_payment" not in st.session_state:
+                            st.session_state["constructor_mix_fixed_payment"] = float(fixed_payment) * 0.5
                     active_fixed_payment = float(st.session_state["constructor_fixed_payment_base"])
                     active_mix_fixed_payment = float(st.session_state["constructor_mix_fixed_payment"])
 

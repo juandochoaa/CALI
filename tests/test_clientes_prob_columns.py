@@ -16,7 +16,7 @@ def test_probability_columns_excludes_cashdays_zero() -> None:
 
 
 def test_clientes_page_does_not_reference_cashdays_zero() -> None:
-    page_path = Path("dashboards/pages/1_Clientes.py")
+    page_path = Path("dashboards/pages/3_Clientes.py")
     content = page_path.read_text(encoding="utf-8", errors="ignore")
     assert "P_avg_CashDays_lt_0" not in content
     assert "cash_thresholds=(15, 0)" not in content

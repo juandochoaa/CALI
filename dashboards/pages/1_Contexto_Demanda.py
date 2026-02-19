@@ -371,6 +371,53 @@ def _render_barrera_salud_section() -> None:
     )
 
 
+def _render_mortalidad_section() -> None:
+    section_header("Mortalidad", "Enfermedades del sistema circulatorio - Valle del Cauca")
+    explain_box(
+        "Fuente",
+        [
+            "Analisis de Situacion de Salud Participativo 2025 - Secretaria Departamental de Salud del Valle del Cauca.",
+            "Se presenta la evolucion de tasas por 100.000 habitantes para principales causas del sistema circulatorio.",
+        ],
+    )
+
+    img_path = Path(__file__).resolve().parents[2] / "data" / "raw" / "PrincipalesMortalidadValle.png"
+    if img_path.exists():
+        st.image(str(img_path), width="stretch")
+    else:
+        st.warning("No se encontro la imagen PrincipalesMortalidadValle.png en data/raw.")
+
+    col1, col2 = st.columns(2)
+    img_sant = Path(__file__).resolve().parents[2] / "data" / "raw" / "MortalidadSantander.png"
+    img_valle = Path(__file__).resolve().parents[2] / "data" / "raw" / "MortalidadValle.png"
+    with col1:
+        st.markdown("**Mortalidad Santander**")
+        if img_sant.exists():
+            st.image(str(img_sant), width="stretch")
+        else:
+            st.warning("No se encontro la imagen MortalidadSantander.png en data/raw.")
+    with col2:
+        st.markdown("**Mortalidad Valle del Cauca**")
+        if img_valle.exists():
+            st.image(str(img_valle), width="stretch")
+        else:
+            st.warning("No se encontro la imagen MortalidadValle.png en data/raw.")
+
+    st.markdown(
+        """
+Segun informes de Analisis de Situacion de Salud Participativo 2025 de la Secretaria Departamental de Salud del Valle del Cauca, dentro de las enfermedades del sistema circulatorio, en los ultimos 10 anos, las enfermedades isquemicas del corazon destacan con las tasas mas altas con fluctuaciones entre 76 y 98 muertes por cada 100.000 habitantes.
+
+En segundo lugar, se encuentran las enfermedades cerebrovasculares con tasas alrededor de 30-40 por 100.000 habitantes, muestran una tendencia general al descenso entre 2014 y 2020 pero con un leve aumento en los anos mas recientes.
+
+Las enfermedades hipertensivas, cardiopulmonares y demas enfermedades del sistema circulatorio presentan tasas menores, entre los 5 y 15 muertes por 100.000 habitantes.
+        """
+    )
+    st.caption(
+        "Tomado de ASIS Valle del Cauca 2025: "
+        "https://www.valledelcauca.gov.co/loader.php?lServicio=Tools2&lTipo=descargas&lFuncion=visorpdf&file=https%3A%2F%2Fwww.valledelcauca.gov.co%2Floader.php%3FlServicio%3DTools2%26lTipo%3Ddescargas%26lFuncion%3DexposeDocument%26idFile%3D114617%26tmp%3Ddafa5db0b31cd609739ff2b8d01ca13f%26urlDeleteFunction%3Dhttps%253A%252F%252Fwww.valledelcauca.gov.co%252Floader.php%253FlServicio%253DTools2%2526lTipo%253Ddescargas%2526lFuncion%253DdeleteTemporalFile%2526tmp%253Ddafa5db0b31cd609739ff2b8d01ca13f&pdf=1&tmp=dafa5db0b31cd609739ff2b8d01ca13f&fileItem=114617"
+    )
+
+
 def _render_conclusiones_contexto_demanda() -> None:
     section_header("Conclusiones", "Lectura ejecutiva del contexto de demanda")
     st.markdown(
@@ -420,6 +467,7 @@ takeaway_box(
 section_header("Calculo central de poblacion objetivo")
 snapshot = _compute_and_store_target_population_snapshot()
 _render_target_population(snapshot, show_age_block=True, show_formula_block=True)
+_render_mortalidad_section()
 _render_barrera_salud_section()
 
 section_header("Contexto regional (Santander)")
