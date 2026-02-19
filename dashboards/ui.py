@@ -300,28 +300,38 @@ def divider() -> None:
 
 
 def style_chart(fig):
+    chart_text_color = "#000000"
     fig.update_layout(
         template="simple_white",
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Nunito", color="#0b1f3b"),
+        font=dict(family="Nunito", color=chart_text_color),
         margin=dict(l=18, r=18, t=46, b=18),
-        title_font=dict(size=16, family="Constantia"),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        title_font=dict(size=16, family="Constantia", color=chart_text_color),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1,
+            font=dict(color=chart_text_color),
+            title=dict(font=dict(color=chart_text_color)),
+        ),
         colorway=["#0067b8", "#d62839", "#0b1f3b", "#2a6f97", "#a4161a"],
     )
     fig.update_xaxes(
         showgrid=True,
         gridcolor="rgba(11,31,59,0.08)",
-        tickfont=dict(color="#0b1f3b"),
-        title_font=dict(color="#0b1f3b"),
+        tickfont=dict(color=chart_text_color),
+        title_font=dict(color=chart_text_color),
     )
     fig.update_yaxes(
         showgrid=True,
         gridcolor="rgba(11,31,59,0.08)",
-        tickfont=dict(color="#0b1f3b"),
-        title_font=dict(color="#0b1f3b"),
+        tickfont=dict(color=chart_text_color),
+        title_font=dict(color=chart_text_color),
     )
+    fig.update_annotations(font=dict(color=chart_text_color))
     return fig
 
 
