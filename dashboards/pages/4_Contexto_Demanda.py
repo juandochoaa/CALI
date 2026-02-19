@@ -57,6 +57,7 @@ def _compute_and_store_target_population_snapshot() -> dict:
         eps_edad_df=edad_df,
         prevalencia_df_raw=prev_raw,
     )
+    summary = snapshot.setdefault("summary_metrics", {})
 
     # Complementa TAM/atendidos desde la hoja Comparacion cuando la fuente base es
     # Comparacion_Desglose (que no trae totales de afiliados/atendidos).
@@ -95,7 +96,6 @@ def _compute_and_store_target_population_snapshot() -> dict:
                     min_count=1
                 ) + pd.to_numeric(comp_work[foscal_col], errors="coerce").sum(min_count=1)
 
-            summary = snapshot.setdefault("summary_metrics", {})
             if pd.isna(pd.to_numeric(summary.get("afiliados_valle_total"), errors="coerce")):
                 summary["afiliados_valle_total"] = valle_total
             if pd.isna(pd.to_numeric(summary.get("afiliados_santander_total"), errors="coerce")):
@@ -108,6 +108,26 @@ def _compute_and_store_target_population_snapshot() -> dict:
                     if pd.notna(atendidos_total) and pd.notna(sant_total) and sant_total > 0
                     else pd.NA
                 )
+
+    # Fallback robusto para SAM: si no llega desde el modelo, lo calculamos
+    # con la suma de "Pacientes Totales" en Comparacion_Desglose.
+    if pd.isna(pd.to_numeric(summary.get("sam_pacientes_valle"), errors="coerce")):
+        sam_val = pd.NA
+        comp_cols = [str(c) for c in comp_df.columns]
+        pacientes_totales_col = find_col(comp_cols, ["pacientes", "totales"]) or find_col(
+            comp_cols, ["pacientes", "total"]
+        )
+        if pacientes_totales_col:
+            sam_val = pd.to_numeric(comp_df[pacientes_totales_col], errors="coerce").sum(min_count=1)
+
+        if pd.isna(pd.to_numeric(sam_val, errors="coerce")):
+            edad_chart_df = snapshot.get("edad_chart_df", pd.DataFrame())
+            if isinstance(edad_chart_df, pd.DataFrame) and not edad_chart_df.empty:
+                sam_val = pd.to_numeric(edad_chart_df.get("PacientesPorEdad"), errors="coerce").sum(
+                    min_count=1
+                )
+
+        summary["sam_pacientes_valle"] = sam_val
 
     metadata = snapshot.setdefault("metadata", {})
     metadata["sources"] = {
@@ -246,6 +266,20 @@ def _render_target_population(
                 fig_age = style_chart(fig_age)
                 chart_container(fig_age)
 
+                fig_pie = px.pie(
+                    chart,
+                    names="GrupoEdad",
+                    values="PacientesPorEdad",
+                    title="Distribucion de pacientes por edad (valor y porcentaje)",
+                )
+                fig_pie.update_traces(
+                    texttemplate="%{label}<br>%{value:,.0f} (%{percent})",
+                    textposition="inside",
+                    hovertemplate="%{label}<br>Pacientes: %{value:,.0f}<br>Participacion: %{percent}<extra></extra>",
+                )
+                fig_pie = style_chart(fig_pie)
+                chart_container(fig_pie)
+
     if show_formula_block:
         section_header("Formulas de calculo")
         if isinstance(formula_view, pd.DataFrame) and not formula_view.empty:
@@ -338,6 +372,21 @@ def _render_barrera_salud_section() -> None:
     )
 
 
+def _render_conclusiones_contexto_demanda() -> None:
+    section_header("Conclusiones", "Lectura ejecutiva del contexto de demanda")
+    st.markdown(
+        """
+- Se analizan datos a nivel departamental, dado que la operacion se localiza en las capitales de cada departamento, lo cual facilita el acceso a poblacion proveniente de toda el area metropolitana. En los demas municipios no es habitual la presencia de IPS especializadas en procedimientos cardio-cerebro-vasculares, por lo que los pacientes suelen ser remitidos a las principales ciudades.
+- Santander y Valle del Cauca tienen un porcentaje de poblacion afiliada a salud cercano al 97% (DANE, 2023) y un promedio similar de barreras de acceso a servicios de salud (1.47% en 2019-2024).
+- En ambos departamentos, la principal causa de mortalidad son las enfermedades del sistema circulatorio; su incidencia es mayor en Valle del Cauca (+19% vs Santander: 147.3 vs 123.79 muertes por cada 100,000 habitantes).
+- La prevalencia de enfermedades cardiovasculares aumenta con la edad y en Valle del Cauca hay mayor proporcion de poblacion mayor de 60 anos, mientras Santander tiende a una estructura mas joven.
+- Santander tiene 1.88 veces mas camas UCI por persona que Valle del Cauca.
+- En Santander, el ICB atiende alrededor del 2% de la poblacion afiliada a salud. Para estimar posibles pacientes en Valle del Cauca, se calcula prevalencia cardiovascular por grupo etario y se aplica ese 2% como factor de captura.
+- Con estos supuestos, la estimacion se considera prudente y potencialmente subestimada frente al potencial real de demanda.
+        """
+    )
+
+
 view = subsection_selector(
     ["Resumen", "Mortalidad", "Contexto regional", "Comparacion EPS"],
     key="contexto_demanda_view",
@@ -380,6 +429,7 @@ if view == "Resumen":
     snapshot = _compute_and_store_target_population_snapshot()
     _render_target_population(snapshot, show_age_block=True, show_formula_block=True)
     _render_barrera_salud_section()
+    _render_conclusiones_contexto_demanda()
 
 elif view == "Mortalidad":
     section_header("Distribucion de causas de defuncion", "Colombia")
