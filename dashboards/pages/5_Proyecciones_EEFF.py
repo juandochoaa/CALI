@@ -1065,6 +1065,8 @@ EEFF_OUTPUT_ORDER = [
     "CostosDirectos",
     "CostosIndirectosdeFabricacion",
     "Depreciaciones",
+    "ArriendoPlantas",
+    "ArriendoMaquinasDOTACION",
     "COSTOS",
     "UTILIDADBRUTA",
     "OTROSINGRESOS",
@@ -1118,6 +1120,11 @@ EEFF_ACCOUNT_ALIASES = {
     "costosdirectos": "CostosDirectos",
     "costosindirectosdefabricacion": "CostosIndirectosdeFabricacion",
     "depreciaciones": "Depreciaciones",
+    "arriendoplantas": "ArriendoPlantas",
+    "arriendo plantas": "ArriendoPlantas",
+    "arriendomaquinas": "ArriendoMaquinasDOTACION",
+    "arriendomaquinasdotacion": "ArriendoMaquinasDOTACION",
+    "arriendodedotacion": "ArriendoMaquinasDOTACION",
     "costos": "COSTOS",
     "utilidadbruta": "UTILIDADBRUTA",
     "otrosingresos": "OTROSINGRESOS",
@@ -1229,6 +1236,8 @@ def recompute_derived_accounts(values: pd.Series) -> pd.Series:
         + stmt["CostosDirectos"]
         + stmt["CostosIndirectosdeFabricacion"]
         + stmt["Depreciaciones"]
+        + stmt["ArriendoPlantas"]
+        + stmt["ArriendoMaquinasDOTACION"]
     )
     stmt["UTILIDADBRUTA"] = stmt["INGRESOS"] - stmt["COSTOS"]
     stmt["GASTOSTOTALES"] = (
@@ -1272,9 +1281,13 @@ def build_ratio_from_statement(statement: pd.Series) -> pd.Series:
 
 
 def project_statement_from_ratios(
-    ratio_base: pd.Series, revenue_by_year: pd.Series, years: list[int]
+    ratio_base: pd.Series,
+    revenue_by_year: pd.Series,
+    years: list[int],
+    fixed_cost_overrides: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     out = pd.DataFrame(index=EEFF_OUTPUT_ORDER)
+    overrides = fixed_cost_overrides or {}
     for year in years:
         ingresos_year = pd.to_numeric(revenue_by_year.get(year, np.nan), errors="coerce")
         if pd.isna(ingresos_year):
@@ -1288,6 +1301,9 @@ def project_statement_from_ratios(
             ratio_val = pd.to_numeric(ratio_base.get(account, np.nan), errors="coerce")
             if pd.notna(ratio_val):
                 drivers[account] = float(ratio_val) * float(ingresos_year)
+        for account, value in overrides.items():
+            if account in drivers.index and pd.notna(pd.to_numeric(value, errors="coerce")):
+                drivers[account] = float(value)
         out[year] = recompute_derived_accounts(drivers)
     return out
 
@@ -1299,9 +1315,11 @@ def build_constructor_scenarios(
     pct_utility: float,
     mix_fixed_payment: float,
     mix_pct_utility: float,
+    baseline_fixed_payment: float = 0.0,
 ) -> pd.DataFrame:
     ingresos = pd.to_numeric(proj_statement.loc["INGRESOS", years], errors="coerce")
-    utilidad_base = pd.to_numeric(proj_statement.loc["UTILIDADNETA", years], errors="coerce")
+    utilidad_base_stmt = pd.to_numeric(proj_statement.loc["UTILIDADNETA", years], errors="coerce")
+    utilidad_base = utilidad_base_stmt + float(baseline_fixed_payment)
 
     pago_fijo = pd.Series(float(fixed_payment), index=years, dtype=float)
     # Si la utilidad base es negativa, se asume pago cero para este esquema.
@@ -2303,6 +2321,21 @@ with tab_eeff:
                         "INGRESOS base Cali es invalido (<=0). No se puede construir la proyeccion EEFF."
                     )
                 else:
+                    area_m2 = 4_619.2
+                    monthly_rent_base, fixed_payment_rent = compute_fixed_rent_base(
+                        area_m2=area_m2,
+                        rate_m2=43_349.0,
+                    )
+                    rent_ref_df = build_rent_reference_table(area_m2=area_m2)
+                    dotacion_view, dotacion_total_col, dotacion_total, dotacion_component = summarize_dotacion_table(
+                        dotacion_df
+                    )
+                    arriendo_plantas_cost = float(fixed_payment_rent)
+                    arriendo_maquinas_cost = (
+                        float(dotacion_component) if pd.notna(dotacion_component) else 0.0
+                    )
+                    fixed_payment = arriendo_plantas_cost + arriendo_maquinas_cost
+
                     st.caption(
                         "Proyeccion EEFF: primero se ajusta monto base por factor Cali, luego se "
                         "calculan proporciones y finalmente se aplican a ingresos proyectados por año."
@@ -2318,6 +2351,10 @@ with tab_eeff:
                         ratio_base=ratio_cali_base,
                         revenue_by_year=revenue_by_year,
                         years=proj_years,
+                        fixed_cost_overrides={
+                            "ArriendoPlantas": arriendo_plantas_cost,
+                            "ArriendoMaquinasDOTACION": arriendo_maquinas_cost,
+                        },
                     )
                     ingresos_stmt = pd.to_numeric(
                         proj_statement.loc["INGRESOS", proj_years], errors="coerce"
@@ -2493,6 +2530,7 @@ with tab_eeff:
                         pct_utility=0.0,
                         mix_fixed_payment=active_mix_fixed_payment,
                         mix_pct_utility=0.0,
+                        baseline_fixed_payment=float(fixed_payment),
                     )
                     calibration = calibrate_constructor_percentages(
                         constructor_df=constructor_base_df,
@@ -2598,6 +2636,7 @@ with tab_eeff:
                         pct_utility=float(pct_utility),
                         mix_fixed_payment=float(st.session_state["constructor_mix_fixed_payment"]),
                         mix_pct_utility=float(mix_pct_utility),
+                        baseline_fixed_payment=float(fixed_payment),
                     )
 
                     section_header("Comparacion anual de pagos y utilidad post-pago")
