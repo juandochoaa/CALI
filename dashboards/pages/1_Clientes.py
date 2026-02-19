@@ -401,6 +401,8 @@ def build_eps_ratio_table(
         return pd.DataFrame(columns=["Indicador"] + [str(y) for y in years] + ["Promedio"])
 
     subset = ratios_df[ratios_df["entity"] == selected_eps]
+    if subset.empty:
+        return pd.DataFrame(columns=["Indicador"] + [str(y) for y in years] + ["Promedio"])
     rows: List[Dict[str, Any]] = []
     for ratio in ratio_list:
         if ratio not in ratios_df.columns:
@@ -420,7 +422,18 @@ def build_eps_ratio_table(
         mean_value = float(np.mean(values)) if values else np.nan
         row["Promedio"] = format_ratio_value(mean_value, kind)
         rows.append(row)
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+    year_cols = [str(y) for y in years if str(y) in table.columns]
+    if not year_cols:
+        return pd.DataFrame(columns=["Indicador"] + [str(y) for y in years] + ["Promedio"])
+    has_data = table[year_cols].apply(
+        lambda col: col.astype(str).str.strip().str.upper().ne("NA").any()
+    ).any()
+    if not has_data:
+        return pd.DataFrame(columns=["Indicador"] + [str(y) for y in years] + ["Promedio"])
+    return table
 
 
 def build_eps_indicator_comparison(
@@ -1327,6 +1340,13 @@ available_ratio_indicators = [
     for ratio in EPS_RATIO_LABELS.keys()
     if ratio in eps_ratios_df.columns and not pd.to_numeric(eps_ratios_df[ratio], errors="coerce").dropna().empty
 ]
+eps_with_financials = [
+    eps
+    for eps in eps_universe
+    if eps in set(eps_ratios_df["entity"].dropna().astype(str).tolist())
+]
+default_eps_for_tab = eps_with_financials[0] if eps_with_financials else (eps_universe[0] if eps_universe else None)
+default_eps_index = eps_universe.index(default_eps_for_tab) if default_eps_for_tab in eps_universe else 0
 
 tab_analisis, tab_datos, tab_eps, tab_comp = st.tabs(
     ["Analisis", "Datos", "Analisis EPS", "Comparacion"]
@@ -1790,7 +1810,7 @@ with tab_eps:
     selected_eps = st.selectbox(
         "EPS",
         eps_universe,
-        index=0,
+        index=default_eps_index,
         format_func=lambda x: str(x).upper(),
     )
 
@@ -1836,6 +1856,11 @@ with tab_eps:
     )
     if eps_ratios_df.empty or not eps_ratio_years:
         st.info("No hay informacion suficiente en EPS_EEFF para calcular indicadores financieros EPS.")
+    elif selected_eps not in eps_with_financials:
+        st.warning(
+            "La EPS seleccionada no tiene estados financieros historicos disponibles en EPS_EEFF "
+            "para calcular estos indicadores."
+        )
     else:
         ratio_tabs = st.tabs(["Liquidez", "Solvencia", "Rentabilidad", "Eficiencia"])
         ratio_tab_order = ["Liquidez", "Solvencia", "Rentabilidad", "Eficiencia"]

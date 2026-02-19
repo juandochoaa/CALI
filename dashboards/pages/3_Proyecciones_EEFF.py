@@ -40,7 +40,7 @@ apply_theme()
 
 page_header(
     "Proyecciones (EEFF)",
-    "Ingresos, costos, EBITDA y market share por escenario.",
+    "Ingresos, costos y EBITDA por escenario.",
     "Financial outlook",
 )
 
@@ -1764,7 +1764,7 @@ if target_snapshot_autogen:
 proj_totals = pd.DataFrame()
 total_year1 = np.nan
 
-tab_eeff, tab_tar, tab_share = st.tabs(["EEFF", "Tarifas", "Market Share"])
+tab_eeff, tab_tar = st.tabs(["EEFF", "Tarifas"])
 
 with tab_eeff:
     if "precio_scenario" in st.session_state and st.session_state["precio_scenario"] not in price_scenarios:
@@ -2822,172 +2822,3 @@ with tab_tar:
                 ),
                 width='stretch',
             )
-
-with tab_share:
-    section_header("Market share proyectado", "IPS + proyecto (2026-2030)")
-    explain_box(
-        "Como se calcula",
-        [
-            "IPS crecen con tasa de mercado; proyecto con tarifas y crecimiento.",
-            "Market share = ingresos entidad / (IPS total + proyecto).",
-        ],
-    )
-
-    proj_totals_share = st.session_state.get("proj_totals", pd.DataFrame())
-    total_year1_share = st.session_state.get("total_year1", np.nan)
-    proj_years_share = st.session_state.get("proj_years")
-
-    if proj_totals_share.empty:
-        st.warning("No hay proyecciones de ventas por tarifas disponibles.")
-        st.stop()
-
-    year_col = pick_year_col(proj_totals_share)
-    if year_col is None:
-        st.warning("No se pudo detectar la columna de anio en proyecciones.")
-        st.stop()
-
-    if proj_years_share is None:
-        proj_years_share = sorted(proj_totals_share[year_col].dropna().astype(int).unique())
-
-    market_growth = st.slider(
-        "Crecimiento mercado",
-        0.02,
-        0.12,
-        0.06,
-        key="market_growth_share",
-    )
-
-    target_year = st.selectbox(
-        "Anio objetivo para llegar al potencial del Valle",
-        proj_years_share,
-        index=len(proj_years_share) - 1,
-        key="target_year_share",
-    )
-
-    growth_required = None
-    if (
-        pd.notna(objetivo_valle)
-        and pd.notna(total_year1_share)
-        and total_year1_share > 0
-        and objetivo_valle > 0
-    ):
-        steps_to_target = int(target_year) - int(proj_years_share[0])
-        if steps_to_target > 0:
-            growth_required = (objetivo_valle / total_year1_share) ** (1 / steps_to_target) - 1
-    if growth_required is not None and pd.notna(growth_required):
-        st.caption(
-            f"Tasa requerida para llegar al objetivo en {target_year}: {growth_required:.2%}."
-        )
-        if st.button(f"Ajustar crecimiento para llegar al objetivo en {target_year}"):
-            st.session_state["pending_growth_rate"] = float(growth_required)
-            st.rerun()
-    else:
-        st.caption("No se pudo calcular la tasa requerida para el objetivo.")
-
-    our_rev_mn = proj_totals_share.set_index(year_col)["Ventas"] / 1_000_000
-
-    ips_df, ips_source = load_eps_financials("IPS_EEFF")
-    if ips_df.empty:
-        st.warning("No se encontro IPS_EEFF.")
-        st.caption(f"Detalle: {ips_source}")
-        st.stop()
-
-    ips_year_cols = [c for c in ips_df.columns if str(c).strip().isdigit()]
-    ips_year_cols = sorted(ips_year_cols, key=lambda x: int(x))
-    base_year = 2024 if 2024 in ips_year_cols else (int(ips_year_cols[-1]) if ips_year_cols else None)
-    if base_year is None:
-        st.warning("No hay columnas de anio en IPS_EEFF.")
-        st.stop()
-
-    if "IPS" in ips_df.columns and "EPS_clean" not in ips_df.columns:
-        ips_df["EPS_clean"] = ips_df["IPS"].astype(str).str.replace(".xlsx", "", regex=False).str.strip()
-
-    ips_df["CUENTA_norm"] = ips_df["CUENTA"].astype(str).map(normalize_account)
-    income_accounts = ["ingresos netos por ventas", "total ingreso operativo"]
-    work = ips_df[ips_df["CUENTA_norm"].isin(income_accounts)].copy()
-    if work.empty:
-        st.warning("No se encontraron cuentas de ingresos en IPS_EEFF.")
-        st.stop()
-
-    long_df = work.melt(
-        id_vars=["EPS_clean", "CUENTA_norm"],
-        value_vars=ips_year_cols,
-        var_name="year",
-        value_name="REV",
-    )
-    long_df["REV"] = pd.to_numeric(long_df["REV"], errors="coerce")
-    long_df["year"] = long_df["year"].astype(str).str.strip().astype(int)
-
-    order_map = {acc: idx for idx, acc in enumerate(income_accounts)}
-    long_df["order"] = long_df["CUENTA_norm"].map(order_map)
-    grouped = (
-        long_df[long_df["year"] == base_year]
-        .groupby(["EPS_clean", "year", "CUENTA_norm"], dropna=False)["REV"]
-        .sum(min_count=1)
-        .reset_index()
-    )
-    grouped["order"] = grouped["CUENTA_norm"].map(order_map)
-    grouped = (
-        grouped.sort_values("order")
-        .groupby(["EPS_clean", "year"], as_index=False)
-        .first()
-    )
-    rev_base = grouped[["EPS_clean", "REV"]].rename(columns={"EPS_clean": "IPS"})
-    rev_base = rev_base.dropna(subset=["REV"])
-
-    ips_proj = rev_base.copy()
-    for year in proj_years_share:
-        ips_proj[year] = ips_proj["REV"] * (1 + market_growth) ** (year - base_year)
-    ips_proj = ips_proj.drop(columns=["REV"])
-
-    ips_total_by_year = ips_proj[proj_years_share].sum()
-    market_total = ips_total_by_year + our_rev_mn.reindex(proj_years_share).fillna(0)
-
-    share_df = ips_proj.copy()
-    for year in proj_years_share:
-        share_df[year] = share_df[year] / market_total[year]
-
-    our_row = {"IPS": "NUESTRO PROYECTO"}
-    for year in proj_years_share:
-        our_row[year] = our_rev_mn.get(year, 0.0) / market_total[year]
-    share_df = pd.concat([share_df, pd.DataFrame([our_row])], ignore_index=True)
-
-    year_view = st.selectbox(
-        "Anio para grafica de market share",
-        proj_years_share,
-        index=0,
-        key="market_share_year_view",
-    )
-
-    chart_df = share_df[["IPS", year_view]].copy()
-    chart_df["Tipo"] = np.where(
-        chart_df["IPS"] == "NUESTRO PROYECTO", "Proyecto", "IPS"
-    )
-    chart_df = chart_df.sort_values(year_view, ascending=True)
-    fig = px.bar(
-        chart_df,
-        x=year_view,
-        y="IPS",
-        color="Tipo",
-        orientation="h",
-        text=year_view,
-        title=f"Market share {year_view}",
-        color_discrete_map={"Proyecto": "#c25416", "IPS": "#0f6a62"},
-    )
-    fig.update_xaxes(tickformat=".0%")
-    fig = style_chart(fig)
-    chart_container(fig)
-
-    section_header("Tabla Market Share (IPS + proyecto)")
-    total_row = {"IPS": "TOTAL"}
-    for year in proj_years_share:
-        total_row[year] = share_df[year].sum(skipna=True)
-    share_df = pd.concat([share_df, pd.DataFrame([total_row])], ignore_index=True)
-    st.dataframe(
-        share_df.style.format({year: "{:.2%}" for year in proj_years_share}),
-        width='stretch',
-    )
-
-
-
-
