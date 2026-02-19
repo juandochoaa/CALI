@@ -57,10 +57,62 @@ def _compute_and_store_target_population_snapshot() -> dict:
         eps_edad_df=edad_df,
         prevalencia_df_raw=prev_raw,
     )
+
+    # Complementa TAM/atendidos desde la hoja Comparacion cuando la fuente base es
+    # Comparacion_Desglose (que no trae totales de afiliados/atendidos).
+    comp_base_df, comp_base_source = load_cifras_eps("Comparacion")
+    if not comp_base_df.empty:
+        cols = [str(c) for c in comp_base_df.columns]
+        ent_col = find_col(cols, ["entidad"]) or cols[0]
+        sant_col = find_col(cols, ["santander", "afiliados"])
+        valle_col = find_col(cols, ["valle", "afiliados"])
+        if valle_col is None:
+            unnamed_cols = [c for c in cols if "unnamed" in normalize_text(c)]
+            if unnamed_cols:
+                valle_col = unnamed_cols[0]
+        if valle_col is None and len(cols) >= 3:
+            valle_col = cols[2]
+        icb_col = find_col(cols, ["icb", "atendidos"])
+        foscal_col = find_col(cols, ["foscal", "atendidos"])
+
+        if all([ent_col, sant_col, valle_col, icb_col, foscal_col]):
+            comp_work = comp_base_df.copy()
+            comp_work[ent_col] = comp_work[ent_col].astype(str).str.strip()
+            comp_work["_ent_norm"] = comp_work[ent_col].map(normalize_text)
+            total_row = comp_work[comp_work["_ent_norm"] == "total"]
+
+            if not total_row.empty:
+                row = total_row.iloc[0]
+                sant_total = pd.to_numeric(row[sant_col], errors="coerce")
+                valle_total = pd.to_numeric(row[valle_col], errors="coerce")
+                atendidos_total = pd.to_numeric(row[icb_col], errors="coerce") + pd.to_numeric(
+                    row[foscal_col], errors="coerce"
+                )
+            else:
+                sant_total = pd.to_numeric(comp_work[sant_col], errors="coerce").sum(min_count=1)
+                valle_total = pd.to_numeric(comp_work[valle_col], errors="coerce").sum(min_count=1)
+                atendidos_total = pd.to_numeric(comp_work[icb_col], errors="coerce").sum(
+                    min_count=1
+                ) + pd.to_numeric(comp_work[foscal_col], errors="coerce").sum(min_count=1)
+
+            summary = snapshot.setdefault("summary_metrics", {})
+            if pd.isna(pd.to_numeric(summary.get("afiliados_valle_total"), errors="coerce")):
+                summary["afiliados_valle_total"] = valle_total
+            if pd.isna(pd.to_numeric(summary.get("afiliados_santander_total"), errors="coerce")):
+                summary["afiliados_santander_total"] = sant_total
+            if pd.isna(pd.to_numeric(summary.get("atendidos_santander"), errors="coerce")):
+                summary["atendidos_santander"] = atendidos_total
+            if pd.isna(pd.to_numeric(summary.get("pct_atendido_santander"), errors="coerce")):
+                summary["pct_atendido_santander"] = (
+                    atendidos_total / sant_total
+                    if pd.notna(atendidos_total) and pd.notna(sant_total) and sant_total > 0
+                    else pd.NA
+                )
+
     metadata = snapshot.setdefault("metadata", {})
     metadata["sources"] = {
         "comparacion_desglose": comp_source if "desglose" in normalize_text(comp_sheet_used) else "NA",
-        "comparacion": comp_source if normalize_text(comp_sheet_used) == "comparacion" else "NA",
+        "comparacion": comp_base_source if not comp_base_df.empty else "NA",
         "eps_edad": edad_source,
         "prevalencia": prev_source,
     }
