@@ -990,7 +990,10 @@ def format_currency_df(df: pd.DataFrame, columns: list[str]) -> pd.io.formats.st
     return df.style.format({col: fmt for col in columns if col in df.columns})
 
 
-def summarize_dotacion_table(dotacion_df: pd.DataFrame) -> tuple[pd.DataFrame, str | None, float, float]:
+def summarize_dotacion_table(
+    dotacion_df: pd.DataFrame,
+    component_pct: float = 0.05,
+) -> tuple[pd.DataFrame, str | None, float, float]:
     if dotacion_df.empty:
         return pd.DataFrame(), None, np.nan, np.nan
 
@@ -1028,9 +1031,18 @@ def summarize_dotacion_table(dotacion_df: pd.DataFrame) -> tuple[pd.DataFrame, s
         calc_mask = pd.Series([True] * len(work), index=work.index)
 
     total_sum = pd.to_numeric(work.loc[calc_mask, total_col], errors="coerce").sum(min_count=1)
-    total_10pct = total_sum * 0.10 if pd.notna(total_sum) else np.nan
+    pct = float(pd.to_numeric(component_pct, errors="coerce"))
+    if not np.isfinite(pct):
+        pct = 0.05
+    pct = min(max(pct, 0.0), 1.0)
+    total_component = total_sum * pct if pd.notna(total_sum) else np.nan
 
-    return work, total_col, float(total_sum) if pd.notna(total_sum) else np.nan, float(total_10pct) if pd.notna(total_10pct) else np.nan
+    return (
+        work,
+        total_col,
+        float(total_sum) if pd.notna(total_sum) else np.nan,
+        float(total_component) if pd.notna(total_component) else np.nan,
+    )
 
 
 def pick_ingresos_series(annual_pivot: pd.DataFrame) -> pd.Series | None:
@@ -2327,8 +2339,21 @@ with tab_eeff:
                         rate_m2=43_349.0,
                     )
                     rent_ref_df = build_rent_reference_table(area_m2=area_m2)
+                    dotacion_component_pct = (
+                        st.number_input(
+                            "Porcentaje DOTACION para arriendo de maquinaria (%)",
+                            min_value=0.0,
+                            max_value=100.0,
+                            value=5.0,
+                            step=0.5,
+                            format="%.2f",
+                            key="dotacion_component_pct",
+                        )
+                        / 100.0
+                    )
                     dotacion_view, dotacion_total_col, dotacion_total, dotacion_component = summarize_dotacion_table(
-                        dotacion_df
+                        dotacion_df,
+                        component_pct=dotacion_component_pct,
                     )
                     arriendo_plantas_cost = float(fixed_payment_rent)
                     arriendo_maquinas_cost = (
@@ -2410,7 +2435,7 @@ with tab_eeff:
                         "Como se calcula",
                         [
                             "Referencia de lote: minimo/promedio/maximo en COP por m2.",
-                            "Se incorpora DOTACION: 10% de la suma de la columna TOTAL.",
+                            f"Se incorpora DOTACION: {dotacion_component_pct:.2%} de la suma de la columna TOTAL.",
                             "Caso base obligatorio: escenario Promedio (arriendo fijo mensual).",
                             "Se comparan tres escenarios: monto fijo, % utilidades y mix fijo + % utilidades.",
                             "Se calibra automaticamente % utilidades para igualar VP del pago fijo base.",
@@ -2425,7 +2450,8 @@ with tab_eeff:
                     )
                     rent_ref_df = build_rent_reference_table(area_m2=area_m2)
                     dotacion_view, dotacion_total_col, dotacion_total, dotacion_component = summarize_dotacion_table(
-                        dotacion_df
+                        dotacion_df,
+                        component_pct=dotacion_component_pct,
                     )
                     fixed_payment = (
                         float(fixed_payment_rent) + float(dotacion_component)
@@ -2459,7 +2485,7 @@ with tab_eeff:
                             f"${dotacion_total:,.0f}" if pd.notna(dotacion_total) else "NA",
                         )
                         d_col2.metric(
-                            "10% de DOTACION (componente fijo)",
+                            f"{dotacion_component_pct:.2%} de DOTACION (componente fijo)",
                             f"${dotacion_component:,.0f}" if pd.notna(dotacion_component) else "NA",
                         )
 
