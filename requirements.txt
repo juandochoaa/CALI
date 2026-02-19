@@ -7,7 +7,7 @@ scikit-learn
 numba
 joblib
 plotly
-streamlit
+streamlit==1.54.0
 dash
 great_expectations
 pydantic

@@ -25,7 +25,7 @@ from dashboards.ui import (
     takeaway_box,
     text_card,
 )
-from src.models.target_population import compute_target_population
+from src.models.target_population import compute_target_population, normalize_text
 
 st.set_page_config(page_title="Contexto y Demanda", layout="wide")
 apply_theme()
