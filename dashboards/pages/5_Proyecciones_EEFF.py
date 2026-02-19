@@ -1833,11 +1833,6 @@ target_snapshot, objetivo_valle, target_snapshot_autogen = _resolve_target_popul
     edad_source=edad_source,
     prev_source=prev_source,
 )
-if target_snapshot_autogen:
-    st.info(
-        "Se autogenero el calculo de poblacion objetivo en esta pagina. "
-        "Al abrir Contexto y Demanda se reutilizara el mismo snapshot."
-    )
 
 proj_totals = pd.DataFrame()
 total_year1 = np.nan
@@ -1898,7 +1893,6 @@ with tab_eeff:
                 )
                 ratio_df["Promedio"] = ratio_df.mean(axis=1, skipna=True)
 
-    has_proj_kpi = False
     if not proj.empty:
         required_cols = {
             "year",
@@ -1967,27 +1961,26 @@ with tab_eeff:
             st.warning("La hoja de proyecciones no tiene las columnas requeridas.")
 
     divider()
-    section_header("Ventas Año 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
+    section_header("Ventas Año 1 por servicio", "Base de pacientes del escenario activo")
     explain_box(
         "Como se calcula",
         [
-            "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
+            "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES de la hoja.",
+            "Si en un servicio no hay dato de pacientes, se completa con el mix (%Pacientes).",
             "El mix (%Pacientes) se recalcula desde ese Año 1 y se proyecta hacia adelante.",
             "Tarifa operativa por servicio: TARIFAS (valor final del escenario).",
             "Intervenciones = RatioIntervenciones x PacientesValle.",
             "Desde Año 2 en adelante se usa el promedio histórico de crecimiento de ventas.",
         ],
     )
-    if pd.isna(objetivo_valle):
-        st.warning("No se pudo calcular el objetivo Valle (posibles atendidos).")
-    else:
-        scenario = st.session_state.get("precio_scenario", price_scenarios[0])
-        proj_years = list(range(2026, 2031))
-        growth_default = growth_avg
-        if pd.isna(growth_default):
-            st.warning("No se pudo calcular crecimiento historico; se asume 0%.")
-            growth_default = 0.0
-        growth_rate = float(growth_default)
+    scenario = st.session_state.get("precio_scenario", price_scenarios[0])
+    proj_years = list(range(2026, 2031))
+    growth_default = growth_avg
+    if pd.isna(growth_default):
+        st.warning("No se pudo calcular crecimiento historico; se asume 0%.")
+        growth_default = 0.0
+    growth_rate = float(growth_default)
+    if True:
 
         tariffs_serv, _ = selector_escenario_tarifas(
             scenario, tarifas_esc_df
@@ -1999,9 +1992,7 @@ with tab_eeff:
             tariffs_serv = tarifas_s1 if not tarifas_s1.empty else tarifas_s2
 
         st.caption(f"Escenario activo: {scenario}.")
-        col1, col2 = st.columns(2)
-        col1.metric("Objetivo Valle (pacientes)", f"{objetivo_valle:,.0f}")
-        col2.metric("Escenario de precios", scenario)
+        st.metric("Escenario de precios", scenario)
 
         st.caption(
             "Escenario 1 se completa con servicios del escenario 2 y se reescalan ponderaciones."
@@ -2010,10 +2001,22 @@ with tab_eeff:
         if tariffs_serv.empty:
             st.warning("No se encontraron tarifas para el escenario seleccionado.")
         else:
+            base_pacientes = float(objetivo_valle) if pd.notna(objetivo_valle) else np.nan
+            if not np.isfinite(base_pacientes):
+                base_pacientes = pd.to_numeric(tariffs_serv.get("PacientesValle"), errors="coerce").sum(
+                    min_count=1
+                )
+            if not np.isfinite(base_pacientes):
+                base_pacientes = pd.to_numeric(tariffs_serv.get("Pacientes"), errors="coerce").sum(
+                    min_count=1
+                )
+            if not np.isfinite(base_pacientes):
+                base_pacientes = 0.0
+
             tariffs, service_proj, proj_totals_active, proj_warnings = (
                 build_service_projection_from_tariffs(
                     tariffs_serv=tariffs_serv,
-                    objetivo_valle=float(objetivo_valle),
+                    objetivo_valle=float(base_pacientes),
                     growth_rate=growth_rate,
                     proj_years=proj_years,
                 )
@@ -2031,7 +2034,7 @@ with tab_eeff:
                         continue
                     _, _, proj_totals_sc, _ = build_service_projection_from_tariffs(
                         tariffs_serv=tariffs_sc,
-                        objetivo_valle=float(objetivo_valle),
+                        objetivo_valle=float(base_pacientes),
                         growth_rate=growth_rate,
                         proj_years=proj_years,
                     )
@@ -2098,16 +2101,13 @@ with tab_eeff:
             explain_box(
                 "Como se calcula",
                 [
-                    "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES y luego objetivo x mix.",
+                    "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES y luego mix %.",
                     "Desde Año 2 se mantiene el mix (%Pacientes) del escenario activo.",
                     "Crecimiento anual fijo igual al promedio histórico de ventas.",
                 ],
             )
             total_year1 = show_df.loc[show_df["Servicio"] != "TOTAL", "Pacientes_Ano1"].sum()
-
-            c_obj1, c_obj2 = st.columns(2)
-            c_obj1.metric("Objetivo Valle (pacientes)", f"{objetivo_valle:,.0f}")
-            c_obj2.metric("Pacientes Año 1 proyectados", f"{total_year1:,.0f}")
+            st.metric("Pacientes Año 1 proyectados", f"{total_year1:,.0f}")
 
             st.caption(f"Tasa predeterminada aplicada: {growth_default:.2%}.")
             st.caption(
@@ -2156,43 +2156,6 @@ with tab_eeff:
                 ),
                 width='stretch',
             )
-
-            if not has_proj_kpi:
-                divider()
-                section_header("KPIs financieros (proxy tarifas)")
-                explain_box(
-                    "Como se calcula",
-                    [
-                        "Proxy construido con ventas por tarifas + ratios Santander.",
-                        "Se estima EBITDA y margen a partir de proporciones históricas.",
-                    ],
-                )
-                revenue_by_year = proj_totals.set_index("Ano")["Ventas"].sort_index()
-                rev_2030 = revenue_by_year.get(2030, np.nan)
-                ebitda_2030 = np.nan
-                if ratio_df is not None:
-                    ebitda_mask = ratio_df.index.map(
-                        lambda x: normalize_account(x) == "ebitda"
-                    )
-                    if ebitda_mask.any():
-                        ebitda_ratio = ratio_df.loc[ebitda_mask, "Promedio"].iloc[0]
-                        ebitda_2030 = ebitda_ratio * rev_2030 if pd.notna(rev_2030) else np.nan
-                margen_ebitda = (
-                    ebitda_2030 / rev_2030 if pd.notna(ebitda_2030) and pd.notna(rev_2030) else np.nan
-                )
-                col1, col2, col3 = st.columns(3)
-                col1.metric(
-                    "Ingresos 2030",
-                    f"${rev_2030:,.0f}" if pd.notna(rev_2030) else "NA",
-                )
-                col2.metric(
-                    "EBITDA 2030",
-                    f"${ebitda_2030:,.0f}" if pd.notna(ebitda_2030) else "NA",
-                )
-                col3.metric(
-                    "Margen EBITDA 2030",
-                    f"{margen_ebitda:.1%}" if pd.notna(margen_ebitda) else "NA",
-                )
 
             divider()
             section_header("Estructura de proyeccion anual (2026-2030)")
@@ -2428,6 +2391,98 @@ with tab_eeff:
                         ),
                         width='stretch',
                     )
+
+                    divider()
+                    section_header("Resumen clave de proyecciones")
+                    util_by_year = pd.to_numeric(
+                        proj_statement.loc["UTILIDADNETA", proj_years], errors="coerce"
+                    )
+                    ingresos_by_year = pd.to_numeric(
+                        proj_statement.loc["INGRESOS", proj_years], errors="coerce"
+                    )
+                    year_start = int(proj_years[0])
+                    year_end = int(proj_years[-1])
+                    util_start = pd.to_numeric(util_by_year.get(year_start, np.nan), errors="coerce")
+                    util_end = pd.to_numeric(util_by_year.get(year_end, np.nan), errors="coerce")
+                    margen_end = (
+                        util_end / ingresos_by_year.get(year_end, np.nan)
+                        if pd.notna(util_end) and pd.notna(ingresos_by_year.get(year_end, np.nan))
+                        and ingresos_by_year.get(year_end, np.nan) not in (0, 0.0)
+                        else np.nan
+                    )
+                    if (
+                        pd.notna(util_start)
+                        and pd.notna(util_end)
+                        and util_start > 0
+                        and util_end > 0
+                        and (year_end - year_start) > 0
+                    ):
+                        cagr_util = (util_end / util_start) ** (1 / (year_end - year_start)) - 1
+                    else:
+                        cagr_util = np.nan
+
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric(
+                        f"Margen neto {year_end}",
+                        f"{margen_end:.1%}" if pd.notna(margen_end) else "NA",
+                    )
+                    k2.metric(
+                        f"Utilidad neta {year_end}",
+                        f"${util_end:,.0f}" if pd.notna(util_end) else "NA",
+                    )
+                    k3.metric(
+                        f"CAGR utilidad neta {year_start}-{year_end}",
+                        f"{cagr_util:.1%}" if pd.notna(cagr_util) else "NA",
+                    )
+                    if pd.isna(cagr_util):
+                        st.caption(
+                            "CAGR de utilidad neta requiere utilidad positiva al inicio y al final del periodo."
+                        )
+
+                    g1, g2 = st.columns(2)
+                    with g1:
+                        if not service_proj.empty:
+                            service_sales = (
+                                service_proj.groupby(["Ano", "Servicio"], as_index=False)["Ventas"]
+                                .sum()
+                            )
+                            fig_stack = px.bar(
+                                service_sales,
+                                x="Ano",
+                                y="Ventas",
+                                color="Servicio",
+                                barmode="stack",
+                                title="Gráfica 1. Ventas por servicio (apiladas)",
+                            )
+                            fig_stack = style_chart(fig_stack)
+                            chart_container(fig_stack)
+                        else:
+                            st.info("Sin datos para la Gráfica 1 de ventas por servicio.")
+
+                    with g2:
+                        line_df = pd.DataFrame(
+                            {
+                                "Ano": proj_years,
+                                "Ingresos": ingresos_by_year.to_numpy(dtype=float),
+                                "UtilidadNeta": util_by_year.to_numpy(dtype=float),
+                            }
+                        )
+                        line_plot = line_df.melt(
+                            id_vars="Ano",
+                            value_vars=["Ingresos", "UtilidadNeta"],
+                            var_name="Serie",
+                            value_name="Valor",
+                        )
+                        fig_line = px.line(
+                            line_plot,
+                            x="Ano",
+                            y="Valor",
+                            color="Serie",
+                            markers=True,
+                            title="Gráfica 2. Ingresos vs utilidad neta",
+                        )
+                        fig_line = style_chart(fig_line)
+                        chart_container(fig_line)
 
                     divider()
                     section_header("Escenarios de pago al constructor")
