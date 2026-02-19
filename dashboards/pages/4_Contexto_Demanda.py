@@ -21,7 +21,6 @@ from dashboards.ui import (
     page_header,
     section_header,
     style_chart,
-    subsection_selector,
     takeaway_box,
     text_card,
 )
@@ -387,110 +386,70 @@ def _render_conclusiones_contexto_demanda() -> None:
     )
 
 
-view = subsection_selector(
-    ["Resumen", "Mortalidad", "Contexto regional", "Comparacion EPS"],
-    key="contexto_demanda_view",
-    label="Vista",
+section_header("Poblacion objetivo", "Panorama sintetico")
+insight_cards(
+    [
+        (
+            "Tamano del mercado",
+            "Dimensionar poblacion en Cali y Valle del Cauca para estimar demanda potencial.",
+        ),
+        (
+            "Perfil epidemiologico",
+            "Cruzar prevalencia cardiovascular y cerebrovascular por grupos de edad.",
+        ),
+        (
+            "Base de pagadores",
+            "Usar afiliacion EPS para identificar volumen comercial posible.",
+        ),
+    ],
+    columns=3,
+)
+bullet_card(
+    "Enfoques de trabajo",
+    [
+        "Cuantificar afiliacion y atencion por EPS.",
+        "Usar comparativo Santander para construir referencia de atencion.",
+        "Traducir hallazgos en estimacion de pacientes potenciales.",
+    ],
+)
+takeaway_box(
+    "Lectura ejecutiva",
+    "Esta pagina prioriza contexto para demanda: no muestra calculos financieros, sino base de mercado y riesgo.",
 )
 
-if view == "Resumen":
-    section_header("Poblacion objetivo", "Panorama sintetico")
-    insight_cards(
-        [
-            (
-                "Tamano del mercado",
-                "Dimensionar poblacion en Cali y Valle del Cauca para estimar demanda potencial.",
-            ),
-            (
-                "Perfil epidemiologico",
-                "Cruzar prevalencia cardiovascular y cerebrovascular por grupos de edad.",
-            ),
-            (
-                "Base de pagadores",
-                "Usar afiliacion EPS para identificar volumen comercial posible.",
-            ),
-        ],
-        columns=3,
-    )
-    bullet_card(
-        "Enfoques de trabajo",
-        [
-            "Cuantificar afiliacion y atencion por EPS.",
-            "Usar comparativo Santander para construir referencia de atencion.",
-            "Traducir hallazgos en estimacion de pacientes potenciales.",
-        ],
-    )
-    takeaway_box(
-        "Lectura ejecutiva",
-        "Esta pagina prioriza contexto para demanda: no muestra calculos financieros, sino base de mercado y riesgo.",
-    )
+section_header("Calculo central de poblacion objetivo")
+snapshot = _compute_and_store_target_population_snapshot()
+_render_target_population(snapshot, show_age_block=True, show_formula_block=True)
+_render_barrera_salud_section()
 
-    section_header("Calculo central de poblacion objetivo")
-    snapshot = _compute_and_store_target_population_snapshot()
-    _render_target_population(snapshot, show_age_block=True, show_formula_block=True)
-    _render_barrera_salud_section()
-    _render_conclusiones_contexto_demanda()
+section_header("Contexto regional (Santander)")
+explain_box(
+    "Como se calcula",
+    [
+        "Resumen de contexto regional (mortalidad cardiovascular).",
+        "No hay calculos en esta seccion.",
+    ],
+)
+text_card(
+    "Hallazgo principal",
+    (
+        "La principal causa de mortalidad en la region son las enfermedades cardiovasculares, "
+        "con tasa de 183.8 por cada 100,000 habitantes en 2022."
+    ),
+)
+bullet_card(
+    "Municipios mas afectados",
+    [
+        "Guapota",
+        "Betulia",
+        "Charta",
+        "Landazuri",
+        "Chipata",
+    ],
+)
+takeaway_box(
+    "Implicacion para el proyecto",
+    "El comportamiento regional refuerza la necesidad de una oferta especializada y de alto acceso oportuno.",
+)
 
-elif view == "Mortalidad":
-    section_header("Distribucion de causas de defuncion", "Colombia")
-    explain_box(
-        "Como se calcula",
-        [
-            "Se muestran imagenes oficiales de causas de defuncion.",
-            "No hay calculos en esta seccion.",
-        ],
-    )
-
-    raw_dir = Path(__file__).resolve().parents[2] / "data" / "raw"
-    img_2024 = raw_dir / "Pastel_muertes_2024.png"
-    img_2025 = raw_dir / "Pastel_muertes_2025.png"
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if img_2024.exists():
-            st.image(str(img_2024), width="stretch")
-        else:
-            st.warning("No se encontro Pastel_muertes_2024.png en data/raw.")
-    with col2:
-        if img_2025.exists():
-            st.image(str(img_2025), width="stretch")
-        else:
-            st.warning("No se encontro Pastel_muertes_2025.png en data/raw.")
-
-    st.caption("Fuente: DANE - Estadisticas Vitales. 2025pr: cifras preliminares.")
-
-elif view == "Contexto regional":
-    section_header("Contexto regional (Santander)")
-    explain_box(
-        "Como se calcula",
-        [
-            "Resumen de contexto regional (mortalidad cardiovascular).",
-            "No hay calculos en esta seccion.",
-        ],
-    )
-    text_card(
-        "Hallazgo principal",
-        (
-            "La principal causa de mortalidad en la region son las enfermedades cardiovasculares, "
-            "con tasa de 183.8 por cada 100,000 habitantes en 2022."
-        ),
-    )
-    bullet_card(
-        "Municipios mas afectados",
-        [
-            "Guapota",
-            "Betulia",
-            "Charta",
-            "Landazuri",
-            "Chipata",
-        ],
-    )
-    takeaway_box(
-        "Implicacion para el proyecto",
-        "El comportamiento regional refuerza la necesidad de una oferta especializada y de alto acceso oportuno.",
-    )
-
-else:
-    section_header("Comparacion EPS (Santander vs Valle)")
-    snapshot = _get_target_population_snapshot()
-    _render_target_population(snapshot, show_age_block=False, show_formula_block=False)
+_render_conclusiones_contexto_demanda()
