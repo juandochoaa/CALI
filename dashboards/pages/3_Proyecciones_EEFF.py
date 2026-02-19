@@ -1848,15 +1848,15 @@ with tab_eeff:
             st.warning("La hoja de proyecciones no tiene las columnas requeridas.")
 
     divider()
-    section_header("Ventas AÃ±o 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
+    section_header("Ventas Año 1 por objetivo de pacientes", "Objetivo Valle + mix del escenario")
     explain_box(
         "Como se calcula",
         [
-            "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
-            "El mix (%Pacientes) se recalcula desde ese AÃ±o 1 y se proyecta hacia adelante.",
+            "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio (si falta, usa objetivo x mix).",
+            "El mix (%Pacientes) se recalcula desde ese Año 1 y se proyecta hacia adelante.",
             "Tarifa operativa por servicio: TARIFAS (valor final del escenario).",
             "Intervenciones = RatioIntervenciones x PacientesValle.",
-            "Desde AÃ±o 2 en adelante se usa el promedio histÃ³rico de crecimiento de ventas.",
+            "Desde Año 2 en adelante se usa el promedio histórico de crecimiento de ventas.",
         ],
     )
     if pd.isna(objetivo_valle):
@@ -1975,25 +1975,25 @@ with tab_eeff:
             st.dataframe(styled, width='stretch')
 
             divider()
-            section_header("ProyecciÃ³n anual por servicio", "Mix del escenario activo desde AÃ±o 2")
+            section_header("Proyección anual por servicio", "Mix del escenario activo desde Año 2")
             explain_box(
                 "Como se calcula",
                 [
-                    "AÃ±o 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES y luego objetivo x mix.",
-                    "Desde AÃ±o 2 se mantiene el mix (%Pacientes) del escenario activo.",
-                    "Crecimiento anual fijo igual al promedio histÃ³rico de ventas.",
+                    "Año 1 usa PACIENTES VALLE DEL CAUCA por servicio; si falta usa PACIENTES y luego objetivo x mix.",
+                    "Desde Año 2 se mantiene el mix (%Pacientes) del escenario activo.",
+                    "Crecimiento anual fijo igual al promedio histórico de ventas.",
                 ],
             )
             total_year1 = show_df.loc[show_df["Servicio"] != "TOTAL", "Pacientes_Ano1"].sum()
 
             c_obj1, c_obj2 = st.columns(2)
             c_obj1.metric("Objetivo Valle (pacientes)", f"{objetivo_valle:,.0f}")
-            c_obj2.metric("Pacientes AÃ±o 1 proyectados", f"{total_year1:,.0f}")
+            c_obj2.metric("Pacientes Año 1 proyectados", f"{total_year1:,.0f}")
 
             st.caption(f"Tasa predeterminada aplicada: {growth_default:.2%}.")
             st.caption(
-                f"Crecimiento histÃ³rico calculado: {growth_default:.2%}. "
-                "Esta misma tasa se usa para proyectar desde AÃ±o 2."
+                f"Crecimiento histórico calculado: {growth_default:.2%}. "
+                "Esta misma tasa se usa para proyectar desde Año 2."
             )
 
             # tabla completa por servicio (wide)
@@ -2045,7 +2045,7 @@ with tab_eeff:
                     "Como se calcula",
                     [
                         "Proxy construido con ventas por tarifas + ratios Santander.",
-                        "Se estima EBITDA y margen a partir de proporciones histÃ³ricas.",
+                        "Se estima EBITDA y margen a partir de proporciones históricas.",
                     ],
                 )
                 revenue_by_year = proj_totals.set_index("Ano")["Ventas"].sort_index()
@@ -2080,7 +2080,7 @@ with tab_eeff:
             explain_box(
                 "Como se calcula",
                 [
-                    "Base BogotÃ¡: promedio monetario 2024-2025 desde BOGOTA_DESGLOSE.",
+                    "Base Bogotá: promedio monetario 2024-2025 desde BOGOTA_DESGLOSE.",
                     "Ajuste Cali: factor editable por cuenta aplicado sobre montos base.",
                     "Con el EEFF base Cali se obtienen proporciones y se aplican a ingresos proyectados.",
                     "Las filas de utilidades/totales siempre se recalculan por formula contable.",
@@ -2186,7 +2186,7 @@ with tab_eeff:
                     }
                 )
 
-                section_header("Base BogotÃ¡ -> Base Cali (monto)")
+                section_header("Base Bogotá -> Base Cali (monto)")
                 st.dataframe(
                     base_table.style.format(
                         {
@@ -2216,7 +2216,7 @@ with tab_eeff:
                 else:
                     st.caption(
                         "Proyeccion EEFF: primero se ajusta monto base por factor Cali, luego se "
-                        "calculan proporciones y finalmente se aplican a ingresos proyectados por aÃ±o."
+                        "calculan proporciones y finalmente se aplican a ingresos proyectados por año."
                     )
                     year_col_proj = pick_year_col(proj_totals)
                     if year_col_proj is None:
@@ -2940,8 +2940,8 @@ with tab_share:
     explain_box(
         "Como se calcula",
         [
-            "Tabla IPS x AÃ±o con participaciÃ³n %.",
-            "Incluye fila TOTAL para validar ~100% por aÃ±o.",
+            "Tabla IPS x Año con participación %.",
+            "Incluye fila TOTAL para validar ~100% por año.",
         ],
     )
     total_row = {"IPS": "TOTAL"}

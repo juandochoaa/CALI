@@ -113,7 +113,7 @@ def _resolve_column(df: pd.DataFrame, candidates: Iterable[str]) -> str | None:
 
 
 def _resolve_year_column(df: pd.DataFrame) -> str:
-    for candidate in ["Año", "AÃ±o", "AÃƒÂ±o", "Ano", "year", "Year"]:
+    for candidate in ["Año", "Ano", "year", "Year"]:
         if candidate in df.columns:
             return candidate
     for col in df.columns:
@@ -190,12 +190,13 @@ def _compute_eps_actual_breaches(
     cash_thresholds: Sequence[int] = (15,),
     paydays_range: tuple[float, float] = (20.0, 70.0),
 ) -> pd.DataFrame:
+    year_label = "Año"
     eeff_wide = _build_eps_eeff_wide(eps_eeff_df=eps_eeff_df, eps_obj=eps_obj)
     if eeff_wide.empty:
         return pd.DataFrame(
             columns=[
                 "EPS",
-                "AÃ±o",
+                year_label,
                 "Obs_CM_ratio_lt_1",
                 "Obs_PA_ratio_lt_1",
                 "Obs_RI_ratio_lt_1",
@@ -261,7 +262,7 @@ def _compute_eps_actual_breaches(
     out = pd.DataFrame(
         {
             "EPS": work["EPS"].astype(str),
-            "AÃ±o": pd.to_numeric(work[year_col], errors="coerce").astype("Int64"),
+            year_label: pd.to_numeric(work[year_col], errors="coerce").astype("Int64"),
             "Obs_CM_ratio_lt_1": (work["CM_ratio"] < 1.0).fillna(False).astype(float),
             "Obs_PA_ratio_lt_1": (work["PA_ratio"] < 1.0).fillna(False).astype(float),
             "Obs_RI_ratio_lt_1": (work["RI_ratio"] < 1.0).fillna(False).astype(float),
@@ -275,9 +276,9 @@ def _compute_eps_actual_breaches(
     for thr in cash_thresholds:
         out[f"Obs_CashDays_lt_{int(thr)}"] = (work["CashDays"] < float(thr)).fillna(False).astype(float)
 
-    out = out.dropna(subset=["AÃ±o"]).copy()
-    out["AÃ±o"] = out["AÃ±o"].astype(int)
-    out = out.sort_values(["EPS", "AÃ±o"]).reset_index(drop=True)
+    out = out.dropna(subset=[year_label]).copy()
+    out[year_label] = out[year_label].astype(int)
+    out = out.sort_values(["EPS", year_label]).reset_index(drop=True)
     return out
 
 
@@ -1095,7 +1096,7 @@ def run_eps_montecarlo_backtesting(
         if sim_results.empty:
             continue
 
-        actual_target = actual_breaches[actual_breaches["AÃ±o"] == target_year].copy()
+        actual_target = actual_breaches[actual_breaches["Año"] == target_year].copy()
         if actual_target.empty:
             continue
 
@@ -1841,7 +1842,7 @@ def build_income_statement_view(
 
     out = pd.DataFrame(
         {
-            "A??o": work[year_col].astype(int),
+            "A?o": work[year_col].astype(int),
             "Ingresos": ingresos.astype(float),
             "OPEX_caja": opex_cash.astype(float),
             "EBITDA": ebitda.astype(float),
@@ -1887,7 +1888,7 @@ def build_eps_historical_compliance(
 
     out = pd.DataFrame(
         {
-            "A??o": work[year_col].astype(int),
+            "A?o": work[year_col].astype(int),
             "CM_ratio": cm_ratio,
             "PA_ratio": pa_ratio,
             "RI_ratio": ri_ratio,

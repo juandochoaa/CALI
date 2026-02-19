@@ -12,7 +12,7 @@ def _build_minimal_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, p
     upc_df = pd.DataFrame(
         {
             "Regimen": ["CONTRIBUTIVO"],
-            "GrupoEdad": ["1-4 aÃ±os"],
+            "GrupoEdad": ["1-4 años"],
             **{year: [1000.0 + (year - 2019) * 50.0] for year in years},
         }
     )
@@ -21,7 +21,7 @@ def _build_minimal_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, p
         {
             "EPS": ["ASMETSALUD EPS"],
             "REGIMEN": ["CONTRIBUTIVO"],
-            "GRUPOEDAD": ["De 0 a 4 aÃ±os"],
+            "GRUPOEDAD": ["De 0 a 4 años"],
             "TOTAL AFILIADOS": [100000.0],
         }
     )

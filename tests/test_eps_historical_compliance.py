@@ -10,7 +10,7 @@ def test_build_eps_historical_compliance_calculates_ratios_and_flags() -> None:
     base_eps = pd.DataFrame(
         {
             "EPS": ["ASMETSALUD EPS", "ASMETSALUD EPS"],
-            "AÃ±o": [2024, 2025],
+            "Año": [2024, 2025],
             "TotalIngresoOperativo": [100000.0, 90000.0],
             "Otroscostospornaturaleza": [60000.0, 0.0],
             "Totaldepatrimonio": [20000.0, 15000.0],
