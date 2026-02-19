@@ -163,16 +163,17 @@ def _render_target_population(
         explain_box(
             "Metodologia",
             [
-                "Conceptualmente, primero se estima TAM por edad con afiliados y prevalencia.",
+                "Primero se estima SAM por edad con afiliados y prevalencia.",
                 "Luego se aplica un factor de captura historico de Santander para obtener SOM.",
                 "Operativamente, la columna 'Pacientes por edad' ya viene ajustada por ese factor y se suma directamente.",
             ],
         )
         st.markdown("### Formulacion")
-        st.latex(r"TAM_g = Afiliados_g \times Prev_g")
-        st.latex(r"TAM = \sum_g TAM_g")
+        st.latex(r"TAM = Total\ de\ afiliados\ en\ Valle\ del\ Cauca")
+        st.latex(r"SAM_g = Afiliados_g \times Prev_g")
+        st.latex(r"SAM = \sum_g SAM_g")
         st.latex(r"\alpha = \frac{Atendidos_{Santander}}{Afiliados_{Santander}}")
-        st.latex(r"SOM_g = TAM_g \times \alpha")
+        st.latex(r"SOM_g = SAM_g \times \alpha")
         st.latex(r"Poblacion\ Objetivo = \sum_g PacientesPorEdad_g")
     else:
         explain_box(
