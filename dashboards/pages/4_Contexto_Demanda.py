@@ -25,7 +25,7 @@ from dashboards.ui import (
     takeaway_box,
     text_card,
 )
-from src.models.target_population import compute_target_population, normalize_text
+from src.models.target_population import compute_target_population, find_col, normalize_text
 
 st.set_page_config(page_title="Contexto y Demanda", layout="wide")
 apply_theme()
@@ -132,23 +132,30 @@ def _render_target_population(
             ],
         )
 
+    section_header("TAM / SAM / SOM", "Dimension del mercado objetivo")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
-        "Poblacion objetivo",
-        _fmt_metric(summary.get("posibles_atendidos_valle")),
+        "TAM (Afiliados Valle)",
+        _fmt_metric(summary.get("afiliados_valle_total")),
     )
     col2.metric(
-        "Atendidos Santander",
-        _fmt_metric(summary.get("atendidos_santander")),
+        "SAM (Pacientes cardiologicos)",
+        _fmt_metric(summary.get("sam_pacientes_valle")),
     )
     col3.metric(
+        "SOM (Posibles atendidos)",
+        _fmt_metric(summary.get("posibles_atendidos_valle")),
+    )
+    col4.metric(
         "% atendido Santander",
         _fmt_metric(summary.get("pct_atendido_santander"), percent=True),
     )
-    col4.metric(
-        "Afiliados Valle del Cauca",
-        _fmt_metric(summary.get("afiliados_valle_total")),
-    )
+
+    tam_img = Path(__file__).resolve().parents[2] / "data" / "raw" / "TAMSAMSOM.png"
+    if tam_img.exists():
+        st.image(str(tam_img), width="stretch")
+    else:
+        st.info("No se encontro la imagen TAMSAMSOM.png en data/raw.")
 
     section_header("Tabla comparativa EPS")
     if isinstance(eps_view, pd.DataFrame) and not eps_view.empty:
@@ -176,10 +183,15 @@ def _render_target_population(
             chart["PacientesPorEdad"] = pd.to_numeric(chart["PacientesPorEdad"], errors="coerce")
             chart = chart.dropna(subset=["PacientesPorEdad"])
             if not chart.empty:
-                st.bar_chart(
-                    chart.set_index("GrupoEdad")["PacientesPorEdad"],
-                    use_container_width=True,
+                fig_age = px.bar(
+                    chart,
+                    x="GrupoEdad",
+                    y="PacientesPorEdad",
+                    title="Pacientes por edad (Valle del Cauca)",
+                    labels={"GrupoEdad": "Grupo de edad", "PacientesPorEdad": "Pacientes"},
                 )
+                fig_age = style_chart(fig_age)
+                chart_container(fig_age)
 
     if show_formula_block:
         section_header("Formulas de calculo")
@@ -258,26 +270,6 @@ def _render_barrera_salud_section() -> None:
     fig.update_yaxes(ticksuffix="%")
     fig = style_chart(fig)
     chart_container(fig)
-
-    idx_df = long_df.copy()
-    base_vals = (
-        idx_df[idx_df["Año"] == min(year_cols)][["Departamento", "BarreraSaludPct"]]
-        .rename(columns={"BarreraSaludPct": "Base2019"})
-    )
-    idx_df = idx_df.merge(base_vals, on="Departamento", how="left")
-    idx_df["IndiceBase2019"] = (idx_df["BarreraSaludPct"] / idx_df["Base2019"]) * 100.0
-
-    fig_idx = px.line(
-        idx_df,
-        x="Año",
-        y="IndiceBase2019",
-        color="Departamento",
-        markers=True,
-        title="Comparacion relativa (Indice base 2019 = 100)",
-        labels={"IndiceBase2019": "Indice", "Departamento": "Departamento"},
-    )
-    fig_idx = style_chart(fig_idx)
-    chart_container(fig_idx)
 
     avg_df = (
         long_df.groupby("Departamento", as_index=False)["BarreraSaludPct"]

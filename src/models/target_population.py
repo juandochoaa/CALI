@@ -107,6 +107,7 @@ def _empty_snapshot(
             "pct_atendido_santander": np.nan,
             "atendidos_santander": np.nan,
             "posibles_atendidos_valle": np.nan,
+            "sam_pacientes_valle": np.nan,
             "afiliados_valle_total": np.nan,
             "afiliados_santander_total": np.nan,
         },
@@ -130,18 +131,20 @@ def _build_formula_view(method: str = "legacy") -> pd.DataFrame:
         return pd.DataFrame(
             {
                 "Campo": [
-                    "TAM por grupo de edad",
-                    "TAM total",
+                    "TAM",
+                    "SAM por grupo de edad",
+                    "SAM total",
                     "Factor de captura Santander",
                     "SOM por grupo de edad",
-                    "Poblacion objetivo (operativa)",
+                    "SOM (poblacion objetivo)",
                     "Nota de implementacion",
                 ],
                 "Formula": [
-                    "TAM_g = Afiliados_g * Prev_g",
-                    "TAM = sum_g(TAM_g)",
+                    "TAM = Total afiliados en Valle del Cauca",
+                    "SAM_g = Afiliados_g * Prev_g",
+                    "SAM = sum_g(SAM_g)",
                     "alpha = Atendidos_Santander / Afiliados_Santander",
-                    "SOM_g = TAM_g * alpha",
+                    "SOM_g = SAM_g * alpha",
                     "Objetivo = sum_g(PacientesPorEdad_g)",
                     "Pacientes por edad ya incorpora el factor de captura alpha.",
                 ],
@@ -184,11 +187,19 @@ def _compute_from_comparacion_desglose(
 
     grupo_edad_col = find_col(comp_cols, ["grupo", "edad"])
     if grupo_edad_col is None:
+        grupo_edad_col = find_col(comp_cols, ["quinquenio"])
+    if grupo_edad_col is None:
+        grupo_edad_col = find_col(comp_cols, ["rango", "edad"])
+    if grupo_edad_col is None:
         for col in comp_cols:
             norm = normalize_text(col)
             if "edad" in norm and "pacientes" not in norm:
                 grupo_edad_col = col
                 break
+
+    pacientes_totales_col = find_col(comp_cols, ["pacientes", "totales"]) or find_col(
+        comp_cols, ["pacientes", "total"]
+    )
 
     afiliados_valle_col = find_col(comp_cols, ["valle", "afiliados"])
     afiliados_sant_col = find_col(comp_cols, ["santander", "afiliados"])
@@ -213,12 +224,16 @@ def _compute_from_comparacion_desglose(
         return None
 
     edad_chart_df = (
-        work.groupby("GrupoEdad", as_index=False)["PacientesPorEdad"]
+        work.groupby("GrupoEdad", as_index=False, sort=False)["PacientesPorEdad"]
         .sum(min_count=1)
-        .sort_values("GrupoEdad")
         .reset_index(drop=True)
     )
     objetivo = pd.to_numeric(edad_chart_df["PacientesPorEdad"], errors="coerce").sum(min_count=1)
+    sam_total = (
+        pd.to_numeric(work[pacientes_totales_col], errors="coerce").sum(min_count=1)
+        if pacientes_totales_col
+        else np.nan
+    )
 
     edad_view = edad_chart_df.copy()
     total_row = {
@@ -264,6 +279,7 @@ def _compute_from_comparacion_desglose(
         "pct_atendido_santander": pct_atendido,
         "atendidos_santander": atendidos_total,
         "posibles_atendidos_valle": objetivo,
+        "sam_pacientes_valle": sam_total,
         "afiliados_valle_total": valle_total,
         "afiliados_santander_total": sant_total,
     }
@@ -378,6 +394,7 @@ def _compute_target_population_legacy(
 
     edad_view = pd.DataFrame()
     edad_chart_df = pd.DataFrame()
+    sam_total = np.nan
 
     detected_edad_work: dict[str, Any] = {}
     if eps_edad_df.empty:
@@ -455,6 +472,7 @@ def _compute_target_population_legacy(
                 )
                 grouped["PacientesEstimados"] = grouped["Prevalencia"] * grouped["Afiliados"]
                 total_pacientes_est = grouped["PacientesEstimados"].sum(min_count=1)
+                sam_total = total_pacientes_est
                 grouped["Ponderacion"] = (
                     grouped["PacientesEstimados"] / total_pacientes_est
                     if pd.notna(total_pacientes_est) and total_pacientes_est > 0
@@ -493,6 +511,7 @@ def _compute_target_population_legacy(
         "pct_atendido_santander": pct_atendido,
         "atendidos_santander": atendidos_total,
         "posibles_atendidos_valle": posibles_valle,
+        "sam_pacientes_valle": sam_total,
         "afiliados_valle_total": valle_total,
         "afiliados_santander_total": sant_total,
     }
